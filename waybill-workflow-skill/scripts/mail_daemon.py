@@ -417,10 +417,13 @@ class TokenHandler(http.server.BaseHTTPRequestHandler):
         self._send(200, page)
 
     def do_POST(self):
-        m = re.match(r'^/t/([\w-]+)/(submit|confirm_submit|cancel|upload)$', self.path)
+        m = re.match(r'^/t/([\w-]+)/(submit|confirm_submit|cancel|upload|back)$', self.path)
         if not m:
             return self._send(404, 'not found', 'text/plain')
         token, action = m.group(1), m.group(2)
+        if action == 'back':
+            # 从核对单返回补充页，不需要额外处理，JS 会自动跳转
+            return self._send(200, json.dumps({'back': True}, ensure_ascii=False), 'application/json')
         with JOBS_LOCK:
             job = JOBS.get(token)
         if not job:

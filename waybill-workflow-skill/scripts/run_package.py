@@ -880,7 +880,12 @@ function cancel(){{
 function goBack(){{
   var btn=document.getElementById('back');
   btn.disabled=true;btn.textContent='正在返回…';
-  fetch('{back_url}',{{method:'POST'}}).catch(function(){{}});
+  var fillUrl='{back_url}';fillUrl=fillUrl.substring(0,fillUrl.lastIndexOf('/'));
+  fetch('{back_url}',{{method:'POST'}}).then(function(){{
+    window.location.href=fillUrl;
+  }}).catch(function(){{
+    window.location.href=fillUrl;
+  }});
   document.getElementById('box').innerHTML='<div class="banner" style="background:#b45309">正在返回补充页，请稍候…</div>';
   document.getElementById('go').style.display='none';document.getElementById('cancel').style.display='none';btn.style.display='none';
 }}
