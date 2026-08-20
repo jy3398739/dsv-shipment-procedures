@@ -74,9 +74,14 @@ def parse_email(path):
             # 区域止于下一个 HAWB（报关行不一定是泽坤，不能按泽坤切）
             nxt = hms[i + 1].start() if i + 1 < len(hms) else len(blk)
             region = blk[hm.end():nxt]
-            is_battery = bool(re.search(r"手机(?:模组)?含电池", region))
-            cat = ("module" if re.search(r"手机模组含电池", region)
-                   else "phone" if is_battery else None)
+            # 结合中文描述判断：含电池 + 模组/手机
+            is_battery = bool(re.search(r"含电池", region))
+            # 只有电池货物才区分 module/phone；非电池分单=零件，cat=None
+            if is_battery:
+                has_module = bool(re.search(r"模组", region))
+                cat = "module" if has_module else "phone"
+            else:
+                cat = None
             # 机型在「含电池」标记后的描述里，无分号也兼容：直接取全部 A\d{4}
             models = list(dict.fromkeys(re.findall(r"[A-Z]\d{4}", region))) if is_battery else []
             # 非电池分单=零件行：在整个 region 里找所有 (中文品名，SVC xxx) 对
@@ -107,14 +112,15 @@ def parse_email(path):
                 "parts": parts,
                 "desc": re.sub(r"\s+", " ", region).strip()[:120],
             })
-    # 去重+清理：转发链有多层表格区块时同 (master,hawb) 会解析出多条；
+    # 去重+清理：转发链有多层表格区块时同一 HAWB 会解析出多条（归属到不同主单）；
     # ① 件数 ≥10万 的行是预报单号误当件数（如 1000067010），直接丢弃；
-    # ② 同 (master,hawb) 保留件数合理的那条（1-9999）
+    # ② 同一 HAWB 只保留首次出现的归属（和 build_masters 的 seen_hawb 一致）；
+    # ③ 同 HAWB 后续出现若件数更合理（1-9999）则替换
     recs = [r for r in recs
             if not (isinstance(r['pcs'], int) and r['pcs'] >= 100000)]
     seen = {}
     for r in recs:
-        key = (r['master'], r['hawb'])
+        key = r['hawb']  # 只按分单号去重，首次归属为准
         cur = seen.get(key)
         if cur is None:
             seen[key] = r

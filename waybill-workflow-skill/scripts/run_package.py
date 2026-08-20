@@ -378,34 +378,36 @@ def apply_patch(st, patch):
             for r in recs:
                 r['models'] = [x for x in r['models'] if x not in del_mdls]
     for hawb, f in (patch.get('recs') or {}).items():
-        for r in st['recs_all']:
-            if r['hawb'] != hawb:
-                continue
-            v = str(f.get('master') or '').strip()
-            if v:
-                r['master'] = v
-            v = str(f.get('hawb') or '').strip()
-            if v:
-                r['hawb'] = v
-            v = str(f.get('is_battery') or '').strip()
-            if v in ('1', '0'):
-                r['is_battery'] = (v == '1')
-            v = str(f.get('pcs') or '').strip()
-            if v:
-                try:
-                    r['pcs'] = int(float(v))
-                except ValueError:
-                    pass
-            v = str(f.get('wt') or '').strip()
-            if v:
-                try:
-                    r['wt'] = float(v)
-                except ValueError:
-                    pass
-            v = str(f.get('models') or '').strip()
-            if v:
-                r['models'] = list(dict.fromkeys(
-                    x.strip() for x in re.split(r'[,，;；\s]+', v) if x.strip()))
+        # 改 per_eml 里的记录（和 recs_all 同一对象引用），rebuild_state 重建时保留修改
+        for eml, body, msg, recs, sc in st['per_eml']:
+            for r in recs:
+                if r['hawb'] != hawb:
+                    continue
+                v = str(f.get('master') or '').strip()
+                if v:
+                    r['master'] = v
+                v = str(f.get('hawb') or '').strip()
+                if v:
+                    r['hawb'] = v
+                v = str(f.get('is_battery') or '').strip()
+                if v in ('1', '0'):
+                    r['is_battery'] = (v == '1')
+                v = str(f.get('pcs') or '').strip()
+                if v:
+                    try:
+                        r['pcs'] = int(float(v))
+                    except ValueError:
+                        pass
+                v = str(f.get('wt') or '').strip()
+                if v:
+                    try:
+                        r['wt'] = float(v)
+                    except ValueError:
+                        pass
+                v = str(f.get('models') or '').strip()
+                if v:
+                    r['models'] = list(dict.fromkeys(
+                        x.strip() for x in re.split(r'[,，;；\s]+', v) if x.strip()))
     covered = {mdl for c in st['certs'] for mdl in c['models']}
     for mdl, f in (patch.get('certs') or {}).items():
         if mdl in covered:
@@ -517,6 +519,8 @@ input.miss{{background:#fdecea;border-color:#b42318}}
 select{{font-size:13px;padding:3px 5px;border:1px solid #999;border-radius:3px}}
 .delbtn{{font-size:12px;padding:3px 10px;background:#dc2626;color:#fff;border:none;border-radius:4px;cursor:pointer}}
 .delbtn:hover{{background:#b91c1c}}
+.rstbtn{{font-size:12px;padding:3px 10px;background:#1a7f37;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-left:4px}}
+.rstbtn:hover{{background:#166534}}
 tr.del{{background:#fee2e2;color:#aaa}}
 tr.del input,tr.del select{{background:#fee2e2}}
 .tip{{font-size:12px;color:#666;margin:4px 0 10px;line-height:1.6}}
@@ -559,7 +563,8 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
                      f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='pcs' size='4' class='{pcs_miss}' value='{'' if r['pcs'] is None else r['pcs']}'></td>"
                      f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='wt' size='6' class='{wt_miss}' value='{'' if r['wt'] is None else r['wt']}'></td>"
                      f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='models' size='28' class='{mdl_miss}' value='{escq(','.join(r['models']))}' placeholder='如 A2636,A2881'></td>"
-                     f"<td><button type='button' class='delbtn' onclick='delRec({ri})'>删除</button></td></tr>")
+                     f"<td><button type='button' class='delbtn' onclick='delRec({ri})'>删除</button>"
+                     f"<button type='button' class='rstbtn' onclick='rstRec({ri})' style='display:none' id='rst-{ri}'>恢复</button></td></tr>")
             ri += 1
     h.append("</table>")
     allm = sorted({m for ent in st['masters_all'].values() for m in ent['models']})
@@ -604,6 +609,14 @@ function delRec(ri){
   var hb=(r.querySelector('input[data-field=hawb]')||{}).value||r.getAttribute('data-hawb')||'';
   DEL.recs[ri]=hb;
   r.className='del';
+  document.getElementById('rst-'+ri).style.display='';
+}
+function rstRec(ri){
+  var r=document.getElementById('rec-'+ri);
+  if(!r)return;
+  delete DEL.recs[ri];
+  r.className='';
+  document.getElementById('rst-'+ri).style.display='none';
 }
 function delMdl(m){DEL.mdls[m]=1;var r=document.getElementById('mdl-'+m);if(r)r.className='del';}
 function upload(){
@@ -773,9 +786,11 @@ def build_confirm_html(st, port=0, base_url=None):
     if base_url:
         submit_url = base_url.rstrip('/') + '/confirm_submit'
         cancel_url = base_url.rstrip('/') + '/cancel'
+        back_url = base_url.rstrip('/') + '/back'
     else:
         submit_url = f'http://127.0.0.1:{port}/confirm_submit' if port else '/confirm_submit'
         cancel_url = f'http://127.0.0.1:{port}/cancel' if port else '/cancel'
+        back_url = f'http://127.0.0.1:{port}/back' if port else '/back'
     h = [f"""<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
 <title>生成前核对确认 - 出货手续包</title>
 <style>
@@ -796,12 +811,16 @@ button{{font-size:15px;padding:8px 22px;color:#fff;border:none;border-radius:6px
 <div class="tip">闸门校验已全部通过。<b>请逐项核对后再点「确认生成」，未确认不会生成任何文件。</b>
 鉴定证书编号可在输入框里直接修改：改后的编号若在鉴定汇总里能查到，该机型的品名会同步改用对应证书行；查不到则只改编号、品名不变。</div>
 <div id="box"><div class="banner">闸门全部通过，待人工确认　|　目的站 {esc(meta.get('dest','-'))}　航班 {esc(meta.get('flight','-'))}　运输日期 {esc(meta.get('date','-'))}</div></div>"""]
+    _seen_hawb = set()  # 和 build_masters 保持一致：同一分单只归属首次出现的主单
     for master, ent in st['masters_all'].items():
         h.append(f"<h2>主单 {esc(master)}（总件数 {ent.get('pcs', '-')}，含电池分单 {ent.get('bpcs', 0)} 件）</h2>")
         h.append("<table><tr><th>HAWB</th><th>含电池</th><th>件数</th><th>毛重</th><th>机型</th></tr>")
         for r in st['recs_all']:
             if r['master'] != master or not r['hawb']:
                 continue
+            if r['hawb'] in _seen_hawb:
+                continue
+            _seen_hawb.add(r['hawb'])
             h.append(f"<tr><td>{esc(r['hawb'])}</td><td>{'是' if r['is_battery'] else '否'}</td>"
                      f"<td>{r['pcs'] if r['pcs'] is not None else '-'}</td>"
                      f"<td>{r['wt'] if r['wt'] is not None else '-'}</td>"
@@ -817,6 +836,7 @@ button{{font-size:15px;padding:8px 22px;color:#fff;border:none;border-radius:6px
         h.append("</table>")
     h.append(f"""<button id="go" onclick="go()">确认生成</button>
 <button id="cancel" onclick="cancel()">取消（不生成）</button>
+<button id="back" style="background:#6b7280" onclick="goBack()">返回修改</button>
 <script>
 function collect(){{
   var d={{certs:{{}}}};
@@ -835,7 +855,7 @@ function go(){{
         +((j.notes&&j.notes.length)?('<div class="banner" style="background:#b45309">证书改动：'+j.notes.join('；')+'</div>'):'')
         +(j.bad>0?('<div class="banner" style="background:#b42318">生成后校验有 '+j.bad+' 项不通过，请按正式核对单人工复核。</div>'):'');
       document.querySelectorAll('input').forEach(function(e){{e.disabled=true;}});
-      btn.style.display='none';document.getElementById('cancel').style.display='none';
+      btn.style.display='none';document.getElementById('cancel').style.display='none';document.getElementById('back').style.display='none';
     }}else{{
       box.innerHTML='<div class="banner" style="background:#b42318">无法生成：'+j.issues.length+' 项问题</div><ul>'
         +j.issues.map(function(i){{return '<li class="bad">'+i.replace(/</g,'&lt;')+'</li>';}}).join('')+'</ul>';
@@ -850,7 +870,14 @@ function go(){{
 function cancel(){{
   fetch('{cancel_url}',{{method:'POST'}}).catch(function(){{}});
   document.getElementById('box').innerHTML='<div class="banner" style="background:#6b7280">已取消，未生成手续包，可关闭本页。</div>';
-  document.getElementById('go').style.display='none';document.getElementById('cancel').style.display='none';
+  document.getElementById('go').style.display='none';document.getElementById('cancel').style.display='none';document.getElementById('back').style.display='none';
+}}
+function goBack(){{
+  var btn=document.getElementById('back');
+  btn.disabled=true;btn.textContent='正在返回…';
+  fetch('{back_url}',{{method:'POST'}}).catch(function(){{}});
+  document.getElementById('box').innerHTML='<div class="banner" style="background:#b45309">正在返回补充页，请稍候…</div>';
+  document.getElementById('go').style.display='none';document.getElementById('cancel').style.display='none';btn.style.display='none';
 }}
 </script></body></html>""")
     return "".join(h)
@@ -860,7 +887,7 @@ def serve_confirm(st):
     """闸门全过后开「生成前核对单」：人工核对、可改证书编号，确认后才生成；取消不生成。返回是否生成成功。"""
     import http.server
     import json as _json
-    state = {'done': False, 'ok': False}
+    state = {'done': False, 'ok': False, 'back': False}
     page = None
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -886,6 +913,11 @@ def serve_confirm(st):
                 self._send(404, 'not found', 'text/plain')
 
         def do_POST(self):
+            if self.path == '/back':
+                print("\n[返回] 用户从确认页返回补充页修改。")
+                state['done'] = True
+                state['back'] = True
+                return self._send(200, _json.dumps({'back': True}, ensure_ascii=False), 'application/json')
             if self.path == '/cancel':
                 print("\n[取消] 用户在确认页点了取消，未生成手续包。")
                 state['done'] = True
@@ -948,6 +980,8 @@ def serve_confirm(st):
     except KeyboardInterrupt:
         print("\n[中断] 已取消，未生成手续包。")
     srv.server_close()
+    if state.get('back'):
+        return 'back'
     return state['ok']
 
 
@@ -1031,13 +1065,21 @@ def main():
     issues = collect_gate_issues(st)
     if issues and serve_fill_form(st, issues) != 'confirm':
         return 2
-
+    
     # 闸门全过：先出「生成前核对单」等人工确认（可改证书编号），确认后才生成
     if not os.environ.get('RUNPKG_AUTO_CONFIRM'):
-        ok = serve_confirm(st)
-        if not ok:
-            print("\n[未生成] 已取消或未确认，未生成手续包。")
-        return 0 if ok else 2
+        while True:
+            result = serve_confirm(st)
+            if result == 'back':
+                # 用户从确认页返回补充页修改
+                issues = collect_gate_issues(st)
+                if serve_fill_form(st, issues) != 'confirm':
+                    return 2
+                # 补充完毕，再次进入确认页
+                continue
+            if not result:
+                print("\n[未生成] 已取消或未确认，未生成手续包。")
+            return 0 if result else 2
 
     # RUNPKG_AUTO_CONFIRM：跳过确认页直接生成（自动化/测试用）
     print("[确认] 检测到 RUNPKG_AUTO_CONFIRM，跳过人工确认直接生成。")
