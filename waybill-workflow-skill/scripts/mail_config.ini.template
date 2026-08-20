@@ -1,0 +1,30 @@
+; ===== 出货手续包邮件守护配置模板 =====
+; 复制为 mail_config.ini（与 mail_daemon.py 同目录），填上真实值。
+; 含邮箱授权码，勿提交到共享位置；建议 chmod 600 mail_config.ini
+
+[mail]
+; ---- 收件（IMAP）：收同事转发来的订舱邮件 ----
+; QQ 邮箱：imap.qq.com / 163：imap.163.com / 126：imap.126.com / 企业邮箱问 IT
+imap_host = imap.qq.com
+imap_port = 993
+; ---- 发件（SMTP）：回信手续包 zip + 核对单 ----
+; QQ：smtp.qq.com / 163：smtp.163.com / 126：smtp.126.com
+smtp_host = smtp.qq.com
+; 465=SSL（推荐）；587=STARTTLS
+smtp_port = 465
+; 收件邮箱账号（与 IMAP 同一个）
+user = 你的邮箱@qq.com
+; 邮箱「授权码」（不是登录密码）：QQ 在 设置→账号→IMAP/SMTP 服务 里生成
+password = 授权码填这里
+; 轮询间隔（秒）
+poll_sec = 60
+
+[server]
+; 补充页链接前缀：同事浏览器能访问到的服务器地址。
+; 公网 IP 直连写法：http://公网IP:端口（端口与下面 http_port 一致）。
+; 若有域名 + Nginx 反代 + https，填 https://域名 即可。
+public_base = http://123.45.67.89:8080
+; 令牌补充页监听端口（需在服务器防火墙/安全组放行）
+http_port = 8080
+; 结果固定发到这个地址（留空 = 回给转发邮件的发件人）
+send_to =

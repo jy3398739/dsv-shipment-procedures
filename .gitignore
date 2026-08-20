@@ -1,0 +1,16 @@
+# 运行时产物
+venv/
+出货手续包/
+__pycache__/
+*.pyc
+
+# 敏感配置（含邮箱授权码）
+waybill-workflow-skill/scripts/mail_config.ini
+
+# 客户模板（含主单号，隐私）
+templates/测试*/
+templates/测试2/
+
+# 临时文件
+*.tmp
+*~
