@@ -84,51 +84,162 @@ def find_bars(page):
 
 
 def find_goods_area(page):
-    """右半页小字号连续行段，返回 (rect, fontname, fontsize, line_h)。"""
+    """右半页小字号连续行段，返回 (rect, fontname, fontsize, line_h, from_text)。
+    优先从已有文本检测；若模板无品名文本，则从背景图片中检测表格线定位。"""
     spans = []
     for b in page.get_text('dict')['blocks']:
         for l in b.get('lines', []):
             for s in l['spans']:
-                if s['size'] <= 8 and s['bbox'][0] > page.rect.width * 0.6:
+                if s['size'] <= 8 and s['bbox'][0] > page.rect.width * 0.5:
                     spans.append(s)
     spans.sort(key=lambda s: s['bbox'][1])
-    lines = []
-    for s in spans:
-        if lines and abs(s['bbox'][1] - lines[-1][-1]['bbox'][1]) < 2:
-            lines[-1].append(s)
-        else:
-            lines.append([s])
-    # 最长连续段（行距 < 8）
-    segs, cur = [], [lines[0]]
-    for ln in lines[1:]:
-        if ln[0]['bbox'][1] - cur[-1][0]['bbox'][1] < 8:
-            cur.append(ln)
-        else:
-            segs.append(cur)
-            cur = [ln]
-    segs.append(cur)
-    seg = max(segs, key=len)
-    flat = [s for ln in seg for s in ln]
-    x0 = min(s['bbox'][0] for s in flat)
-    x1 = max(s['bbox'][2] for s in flat)
-    y0 = min(s['bbox'][1] for s in flat)
-    y1 = max(s['bbox'][3] for s in flat)
-    fs = statistics.median(s['size'] for s in flat)
-    lhs = [seg[i + 1][0]['bbox'][1] - seg[i][0]['bbox'][1] for i in range(len(seg) - 1)]
-    lh = statistics.median(lhs) if lhs else fs * 1.2
-    # 上下界不得越过表格横线
-    hlines = []
-    for d in page.get_drawings():
-        for it in d['items']:
-            if it[0] == 'l':
-                p0, p1 = it[1], it[2]
-                if abs(p0.y - p1.y) < 0.5 and (p1.x - p0.x) > page.rect.width * 0.5 and p0.x < x0:
-                    hlines.append(p0.y)
-    top = max([h for h in hlines if h < y0], default=y0 - 2)
-    bot = min([h for h in hlines if h > y1], default=y1 + 2)
-    rect = fitz.Rect(x0 - 4, max(top + 1, y0 - 2), min(x1 + 4, page.rect.width - 10), min(bot - 1, y1 + 2))
-    main = max(flat, key=lambda s: len(s['text']))
-    return rect, main['font'], fs, lh
+    
+    # 尝试从文本检测品名区
+    if spans:
+        lines = []
+        for s in spans:
+            if lines and abs(s['bbox'][1] - lines[-1][-1]['bbox'][1]) < 2:
+                lines[-1].append(s)
+            else:
+                lines.append([s])
+        segs, cur = [], [lines[0]]
+        for ln in lines[1:]:
+            if ln[0]['bbox'][1] - cur[-1][0]['bbox'][1] < 8:
+                cur.append(ln)
+            else:
+                segs.append(cur)
+                cur = [ln]
+        segs.append(cur)
+        seg = max(segs, key=len)
+        # 只有多行段才是品名区（排除单行的ID文本等）
+        if len(seg) >= 3:
+            flat = [s for ln in seg for s in ln]
+            x0 = min(s['bbox'][0] for s in flat)
+            x1 = max(s['bbox'][2] for s in flat)
+            y0 = min(s['bbox'][1] for s in flat)
+            y1 = max(s['bbox'][3] for s in flat)
+            fs = statistics.median(s['size'] for s in flat)
+            lhs = [seg[i + 1][0]['bbox'][1] - seg[i][0]['bbox'][1] for i in range(len(seg) - 1)]
+            lh = statistics.median(lhs) if lhs else fs * 1.2
+            # 检测图片中的右边界竖线
+            right_border = _find_right_border_from_image(page, y0, y1)
+            rect = fitz.Rect(x0 - 4, y0 - 2, min(x1 + 4, right_border), y1 + 2)
+            main = max(flat, key=lambda s: len(s['text']))
+            return rect, main['font'], fs, lh, True
+    
+    # 回退：模板无品名文本，从图片中检测表格线定位品名区
+    return _find_goods_area_from_image(page)
+
+
+def _find_right_border_from_image(page, y0_pt, y1_pt):
+    """从页面背景图片中检测品名栏右侧竖线位置。"""
+    try:
+        pix = page.get_pixmap()
+        import numpy as np
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, pix.n))
+        scale_x = pix.width / page.rect.width
+        scale_y = pix.height / page.rect.height
+        y_start_px = max(0, int(y0_pt * scale_y))
+        y_end_px = min(pix.height, int((y1_pt + 10) * scale_y))
+        if y_end_px <= y_start_px + 10:
+            return page.rect.width - 10
+        # 在右侧 85% 以后找暗色列
+        threshold = 80
+        right_start = int(page.rect.width * 0.85 * scale_x)
+        for x in range(right_start, pix.width):
+            col_slice = arr[y_start_px:y_end_px, x]
+            if col_slice.mean() < threshold:
+                return x / scale_x - 2
+    except Exception:
+        pass
+    return page.rect.width - 10
+
+
+def _find_goods_area_from_image(page):
+    """模板无品名文本时，从背景图片检测表格线确定品名区位置。
+    返回 (rect, fontname, fontsize, line_h, from_text)。"""
+    W, H = page.rect.width, page.rect.height
+    # 默认值（基于常见托书布局）
+    x0, x1 = W * 0.42, W - 15
+    y0, y1 = H * 0.43, H * 0.58
+    # 字号对齐已填好的真实托书（英文 4.2/中文 4.0，行距约 5）
+    fs, lh = 4.2, 5.0
+    fontname = 'Helvetica'
+    
+    try:
+        pix = page.get_pixmap()
+        import numpy as np
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, pix.n))
+        scale_x = pix.width / W
+        scale_y = pix.height / H
+        
+        # 找竖线：在页面中部区域(y 40%-60%)找暗色列
+        y_mid_start = int(H * 0.35 * scale_y)
+        y_mid_end = int(H * 0.65 * scale_y)
+        vline_xs = []
+        for x in range(pix.width):
+            col_slice = arr[y_mid_start:y_mid_end, x]
+            if col_slice.mean() < 80:
+                vline_xs.append(x)
+        # 聚类找竖线
+        if vline_xs:
+            clusters = []
+            cur = [vline_xs[0]]
+            for x in vline_xs[1:]:
+                if x - cur[-1] <= 3:
+                    cur.append(x)
+                else:
+                    clusters.append(cur)
+                    cur = [x]
+            clusters.append(cur)
+            # 找品名栏左边界（页面中部偏右的竖线）和右边界（最右侧竖线）
+            centers = [(min(c) + max(c)) / 2 for c in clusters]
+            # 右边界：最右侧的竖线
+            right_x = max(centers) / scale_x - 2
+            # 左边界：在页面 35%-50% 范围内的竖线
+            left_candidates = [c for c in centers if W * 0.30 * scale_x < c < W * 0.55 * scale_x]
+            if left_candidates:
+                left_x = max(left_candidates) / scale_x + 3
+            else:
+                left_x = W * 0.42
+            x0, x1 = left_x, right_x
+        
+        # 找横线：在品名栏 x 范围内找水平线确定上下边界
+        x_start_px = int(x0 * scale_x)
+        x_end_px = int(x1 * scale_x)
+        hline_ys = []
+        for y in range(int(H * 0.3 * scale_y), int(H * 0.7 * scale_y)):
+            row_slice = arr[y, x_start_px:x_end_px]
+            if row_slice.mean() < 80:
+                hline_ys.append(y)
+        if hline_ys:
+            # 聚类找横线
+            hclusters = []
+            cur = [hline_ys[0]]
+            for y in hline_ys[1:]:
+                if y - cur[-1] <= 3:
+                    cur.append(y)
+                else:
+                    hclusters.append(cur)
+                    cur = [y]
+            hclusters.append(cur)
+            hcenters = [(min(c) + max(c)) / 2 for c in hclusters]
+            # 品名区上下边界：找中间区域的横线对
+            mid_ys = [y for y in hcenters if H * 0.3 * scale_y < y < H * 0.7 * scale_y]
+            if len(mid_ys) >= 2:
+                # 第一、二条横线之间是表头行（Nature & Quantity of Goods），
+                # 品名内容必须从第二条横线（表头下边框）之后开始，否则会压住表头
+                top_idx = 1 if len(mid_ys) >= 3 else 0
+                y0 = mid_ys[top_idx] / scale_y + 2
+                # 品名格下边界 = 上边界后的下一条横线（而非最后一条）；
+                # 最后一条是下方郑重声明区的底边，用它会压住声明文字
+                bot_idx = top_idx + 1 if top_idx + 1 < len(mid_ys) else len(mid_ys) - 1
+                y1 = mid_ys[bot_idx] / scale_y - 2
+    except Exception:
+        pass
+    
+    rect = fitz.Rect(x0, y0, x1, y1)
+    return rect, fontname, fs, lh, False
 
 
 def load_goods_font(doc, page, fontname):
@@ -148,10 +259,15 @@ def load_goods_font(doc, page, fontname):
 
 
 def wrap(text, font, fs, maxw):
-    units = re.findall(r'[A-Za-z0-9][A-Za-z0-9.,:()+/\-]*|\s|.', text)
+    """将文本按 maxw 宽度分行。优先在空格/标点处断开，避免单行溢出。
+    对超长英文串，会在逗号、括号等标点处主动换行，而非强制拆字符。"""
+    # 分词：保留空格和标点作为独立 token
+    # 关键：尾部标点（逗号、句号、右括号等）必须单独成 token，才能作为换行点
+    units = re.findall(r'[A-Za-z0-9][A-Za-z0-9.:+/\-]*(?:[A-Za-z0-9.:+/\-]*[A-Za-z0-9])?|[,:;.()\[\]{}]+|\s|.', text)
     lines, cur = [], ''
 
     def force_split(s):
+        """最后手段：逐字符拆分超长串。"""
         out = []
         while font.text_length(s, fontsize=fs) > maxw:
             k = len(s)
@@ -164,12 +280,37 @@ def wrap(text, font, fs, maxw):
     for u in units:
         t = cur + u
         if font.text_length(t, fontsize=fs) > maxw:
+            # 当前行已满，先保存已有内容
             if cur.strip():
                 lines.append(cur.rstrip())
-            cur = '' if u == ' ' else u
-            if font.text_length(cur, fontsize=fs) > maxw:
-                extra, cur = force_split(cur)
-                lines.extend(extra)
+            # 新单元本身是否超宽？
+            if font.text_length(u, fontsize=fs) > maxw:
+                # 尝试在标点处拆分（比逐字符拆更自然）
+                punct_splits = re.split(r'(?<=[,;.:()\[\]{}])', u)
+                if len(punct_splits) > 1:
+                    # 有多个片段，逐个放入
+                    sub_cur = ''
+                    for seg in punct_splits:
+                        if not seg:
+                            continue
+                        test = sub_cur + seg
+                        if font.text_length(test, fontsize=fs) <= maxw:
+                            sub_cur = test
+                        else:
+                            if sub_cur.strip():
+                                lines.append(sub_cur.rstrip())
+                            sub_cur = seg
+                            if font.text_length(sub_cur, fontsize=fs) > maxw:
+                                extra, sub_cur = force_split(sub_cur)
+                                lines.extend(extra)
+                    cur = sub_cur
+                else:
+                    # 没有标点可拆，只能逐字符拆
+                    extra, cur = force_split(u)
+                    lines.extend(extra)
+            else:
+                # 单元不超宽，直接作为新行开头
+                cur = u if u != ' ' else ''
         else:
             cur = t
     if cur.strip():
@@ -209,8 +350,8 @@ def main():
         items = [(r[ci_cn], r[ci_en]) for r in rows[1:] if r[ci_cn]]
     elif a.items_json:
         items = [tuple(x) for x in json.load(open(a.items_json, encoding='utf-8'))]
-    en_text = a.en_head + ",".join(en for _, en in items) + (("." + a.en_tail) if a.en_tail else "")
-    cn_text = ",".join(cn for cn, _ in items) + a.cn_tail
+    en_text = a.en_head + ",".join(en.rstrip(',').rstrip() for _, en in items) + (("." + a.en_tail) if a.en_tail else "")
+    cn_text = ",".join(cn.rstrip(',').rstrip() for cn, _ in items) + a.cn_tail
 
     # ---- 旧号 / 新号 ----
     nums = find_numbers(page)
@@ -232,7 +373,7 @@ def main():
             print('WARN: 条码解码与旧号不符，仍按新号重生成')
 
     # ---- 品名区 ----
-    g_rect, g_fontname, fs, lh = find_goods_area(page)
+    g_rect, g_fontname, fs, lh, from_text = find_goods_area(page)
     font = load_goods_font(doc, page, g_fontname)
 
     # ---- 擦除 ----
@@ -265,12 +406,29 @@ def main():
         print('new barcode width:', round(x - bars[0][0], 2))
 
     # ---- 重画品名 ----
-    X0, X1 = g_rect.x0, min(g_rect.x1, W - 12)
-    en_lines = wrap(en_text, font, fs, X1 - X0) if en_text.strip() else []
-    cn_lines = wrap(cn_text, font, fs, X1 - X0) if cn_text.strip() else []
-    total = len(en_lines) + len(cn_lines)
+    X0, X1 = g_rect.x0, g_rect.x1
+    maxw = X1 - X0 - 1.5  # 留 1.5pt 安全余量，防止 font.text_length 测量误差导致溢出
     avail = g_rect.y1 - g_rect.y0
-    use_lh = lh if total * lh <= avail + 2 else avail / total
+    if from_text:
+        en_lines = wrap(en_text, font, fs, maxw) if en_text.strip() else []
+        cn_lines = wrap(cn_text, font, fs, maxw) if cn_text.strip() else []
+        total = len(en_lines) + len(cn_lines)
+        use_lh = lh if total * lh <= avail + 2 else avail / total
+    else:
+        # 空白模板：内容格很高，自动尽量放大字号铺满空间，避免底部大片留白
+        en_lines = cn_lines = []
+        for try_fs in (7.0, 6.2, 5.4, 4.6, 4.2):
+            en_t = wrap(en_text, font, try_fs, maxw) if en_text.strip() else []
+            cn_t = wrap(cn_text, font, try_fs, maxw) if cn_text.strip() else []
+            en_lines, cn_lines, fs = en_t, cn_t, try_fs
+            # 首行占约一个字号高，其余行各占 use_lh（最低 1.25 倍字号）
+            n = len(en_lines) + len(cn_lines)
+            if n and try_fs + (n - 1) * try_fs * 1.25 <= avail:
+                break
+        total = len(en_lines) + len(cn_lines)
+        # 行距均匀铺满整格：总高 = 首行基线偏移 0.86fs + (n-1)*lh + 尾行下沉 0.29fs
+        # （上限 1.9 倍字号，避免行与行之间过稀）
+        use_lh = min((avail - fs * 1.15) / (total - 1), fs * 1.9) if total > 1 else lh
     y = g_rect.y0 + fs * 0.86
     tw = fitz.TextWriter(page.rect)
     for ln in en_lines + cn_lines:
@@ -283,6 +441,11 @@ def main():
         page.insert_text((W - 90, page.rect.height - 8), '内容由 AI 生成',
                          fontname="china-s", fontsize=8, color=(0.4, 0.4, 0.4))
 
+    # 子集化嵌入字体（TextWriter 写中文会全量嵌入 SimSun，体积暴涨 10MB+）
+    try:
+        doc.subset_fonts()
+    except Exception:
+        pass
     doc.save(a.out, garbage=4, deflate=True)
     doc.close()
 
@@ -296,9 +459,9 @@ def main():
     if txt.count(a.new) != len(num_rects):
         errors.append(f'新运单号出现 {txt.count(a.new)} 次，期望 {len(num_rects)}')
     for cn, en in items:
-        if re.sub(r'\s', '', cn) not in compact:
+        if re.sub(r'\s', '', cn.rstrip(',')) not in compact:
             errors.append('中文品名缺失: ' + cn[:20])
-        if re.sub(r'\s', '', en) not in compact:
+        if re.sub(r'\s', '', en.rstrip(',')) not in compact:
             errors.append('英文品名缺失: ' + en[:20])
     for tail in (a.en_tail, a.cn_tail):
         if tail and re.sub(r'\s', '', tail) not in compact:
