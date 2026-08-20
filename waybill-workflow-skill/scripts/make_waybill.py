@@ -409,33 +409,70 @@ def main():
     X0, X1 = g_rect.x0, g_rect.x1
     maxw = X1 - X0 - 1.5  # 留 1.5pt 安全余量，防止 font.text_length 测量误差导致溢出
     avail = g_rect.y1 - g_rect.y0
+    def try_layout(lines_list, size, line_h):
+        """按基线布局构建 TextWriter，逐字符实测字形真实 bbox（不含字体度量虚边）；
+        越出格子或行间重叠则返回 None（硬性保证不出框、不重叠遮挡）。"""
+        if not lines_list:
+            return None
+        # 格子本身已在检测到的横线内缩 2pt，此处只拦截真实越界（容忍度量舍入误差）
+        top_lim, bot_lim = g_rect.y0 - 0.05, g_rect.y1 + 0.05
+        rows, y = [], g_rect.y0 + size * 0.86
+        tw = fitz.TextWriter(page.rect)
+        for ln in lines_list:
+            tw.append((X0, y), ln, font=font, fontsize=size)
+            rows.append(y)
+            y += line_h
+        # 每行字形实际上下边界（baseline - asc*size ~ baseline - desc*size，desc 为负）
+        asc, desc = font.ascender, font.descender
+        for i, by in enumerate(rows):
+            row_top, row_bot = by - asc * size, by - desc * size
+            if row_top < top_lim or row_bot > bot_lim:
+                return None
+            # 相邻行字形 bbox 交叠即视为重叠
+            if i > 0 and rows[i - 1] - desc * size > row_top:
+                return None
+        tw.last_y = rows[-1]  # 记录末行基线，供日志计算真实底边
+        return tw
+
+    tw = None
     if from_text:
         en_lines = wrap(en_text, font, fs, maxw) if en_text.strip() else []
         cn_lines = wrap(cn_text, font, fs, maxw) if cn_text.strip() else []
         total = len(en_lines) + len(cn_lines)
         use_lh = lh if total * lh <= avail + 2 else avail / total
-    else:
+        tw = try_layout(en_lines + cn_lines, fs, use_lh)
+        if tw is None and total:  # 模板字号放不下时压缩行距硬塞
+            use_lh = (avail - fs * 1.15) / max(total - 1, 1)
+            tw = try_layout(en_lines + cn_lines, fs, max(use_lh, fs))
+    if tw is None and not from_text:
         # 空白模板：内容格很高，自动尽量放大字号铺满空间，避免底部大片留白
-        en_lines = cn_lines = []
         for try_fs in (7.0, 6.2, 5.4, 4.6, 4.2):
             en_t = wrap(en_text, font, try_fs, maxw) if en_text.strip() else []
             cn_t = wrap(cn_text, font, try_fs, maxw) if cn_text.strip() else []
-            en_lines, cn_lines, fs = en_t, cn_t, try_fs
-            # 首行占约一个字号高，其余行各占 use_lh（最低 1.25 倍字号）
-            n = len(en_lines) + len(cn_lines)
-            if n and try_fs + (n - 1) * try_fs * 1.25 <= avail:
+            n = len(en_t) + len(cn_t)
+            if not n or try_fs + (n - 1) * try_fs * 1.25 > avail:
+                continue
+            # 行距均匀铺满整格（上限 1.9 倍字号，避免行与行之间过稀）
+            use_lh = min((avail - try_fs * 1.15) / (n - 1), try_fs * 1.9) if n > 1 else 5.0
+            tw = try_layout(en_t + cn_t, try_fs, use_lh)
+            if tw:
+                en_lines, cn_lines, fs = en_t, cn_t, try_fs
                 break
-        total = len(en_lines) + len(cn_lines)
-        # 行距均匀铺满整格：总高 = 首行基线偏移 0.86fs + (n-1)*lh + 尾行下沉 0.29fs
-        # （上限 1.9 倍字号，避免行与行之间过稀）
-        use_lh = min((avail - fs * 1.15) / (total - 1), fs * 1.9) if total > 1 else lh
-    y = g_rect.y0 + fs * 0.86
-    tw = fitz.TextWriter(page.rect)
-    for ln in en_lines + cn_lines:
-        tw.append((X0, y), ln, font=font, fontsize=fs)
-        y += use_lh
-    tw.write_text(page, color=(0, 0, 0))
-    print('goods lines:', len(en_lines), '+', len(cn_lines), 'bottom:', round(y, 1), '/', round(g_rect.y1, 1))
+        if tw is None:
+            # 兜底：最小字号仍放不下时，压缩行距硬塞（try_layout 保证不出框）
+            en_t = wrap(en_text, font, 4.2, maxw) if en_text.strip() else []
+            cn_t = wrap(cn_text, font, 4.2, maxw) if cn_text.strip() else []
+            n = len(en_t) + len(cn_t)
+            use_lh = (avail - 4.2 * 1.15) / max(n - 1, 1) if n else 5.0
+            tw = try_layout(en_t + cn_t, 4.2, max(use_lh, 4.2)) or try_layout(en_t + cn_t, 4.2, 4.2)
+            en_lines, cn_lines, fs = en_t, cn_t, 4.2
+    if tw:
+        tw.write_text(page, color=(0, 0, 0))
+        real_bot = round(tw.last_y - font.descender * fs, 1)
+        print('goods lines:', len(en_lines), '+', len(cn_lines), 'fontsize:', fs,
+              'glyph bottom:', real_bot, '/ cell y1:', round(g_rect.y1, 1))
+    else:
+        print('goods lines: 0 (内容放不下，未写入品名!)')
 
     if not a.no_ai_label:
         page.insert_text((W - 90, page.rect.height - 8), '内容由 AI 生成',
