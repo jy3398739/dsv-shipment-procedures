@@ -258,6 +258,18 @@ def zip_masters(masters):
     return zp
 
 
+def zip_single_master(master):
+    """把单个主单的手续包目录打一个 zip，返回路径。"""
+    stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    zp = os.path.join(WORK, f'{master}_{stamp}.zip')
+    os.makedirs(WORK, exist_ok=True)
+    d = os.path.join(OUT, master)
+    with zipfile.ZipFile(zp, 'w', zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(os.listdir(d)):
+            z.write(os.path.join(d, f), f)
+    return zp
+
+
 # ================== 结果邮件 HTML ==================
 def result_html(ok, masters, report_html):
     color = '#1a7f37' if ok else '#b42318'
@@ -517,7 +529,7 @@ class TokenHandler(http.server.BaseHTTPRequestHandler):
 
 
 def finish_job(token):
-    """任务闸门全过后：存档旧版→生成→回信→移除任务。成功返回 None，失败返回错误文案。"""
+    """任务闸门全过后：存档旧版→生成→回信（每主单单独 zip + 核对单）→移除任务。"""
     with JOBS_LOCK:
         job = JOBS.get(token)
     if not job:
@@ -526,13 +538,17 @@ def finish_job(token):
         st = job['st']
         masters = list(st['masters_all'].keys())
         archive_existing(masters)
-        _, bad, ok, rp_path = rp.finish(st, job['subject'] or '邮件补充')
-        report = open(rp_path, encoding='utf-8').read()
-        zp = zip_masters(masters)
+        all_checks, bad, ok, rp_path = rp.finish(st, job['subject'] or '邮件补充')
+        # 每个主单单独打一个 zip，加核对单，全部挂在一封邮件的附件里
+        attachments = [rp_path]
+        for master in masters:
+            zp = zip_single_master(master)
+            attachments.append(zp)
         smtp_send(CFG, job['to'],
                   f"出货手续包已生成（{len(masters)} 个主单 × 7 份）{'（有异常项请复核）' if not ok else ''}",
-                  result_html(ok, masters, report),
-                  files=[zp, rp_path], in_reply_to=job['msg_id'])
+                  result_html(ok, masters,
+                              f'<p>手续包已生成，每个主单单独一个 zip 附件，解压即用。核对单见附件。</p>'),
+                  files=attachments, in_reply_to=job['msg_id'])
     except Exception as e:
         import traceback
         traceback.print_exc()
