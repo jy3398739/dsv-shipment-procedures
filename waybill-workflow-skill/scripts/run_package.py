@@ -818,6 +818,9 @@ th{{background:#f0f0f0}}
 input{{font-size:13px;padding:3px 5px;border:1px solid #999;border-radius:3px}}
 .tip{{font-size:12px;color:#666;margin:4px 0 10px;line-height:1.6}}
 .goods{{font-size:12px;color:#333;max-width:430px}}
+.pbar-wrap{{width:100%;max-width:400px;background:#e5e7eb;border-radius:8px;height:22px;margin:10px 0;overflow:hidden}}
+.pbar{{height:100%;background:linear-gradient(90deg,#2563eb,#1a7f37);border-radius:8px;transition:width .4s ease;width:0%}}
+.ptext{{font-size:13px;color:#555;margin:4px 0}}
 button{{font-size:15px;padding:8px 22px;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:10px 8px 10px 0}}
 #go{{background:#1a7f37}} #cancel{{background:#6b7280}}
 .bad{{color:#b42318;font-weight:bold}}
@@ -869,10 +872,26 @@ function collect(){{
 function go(){{
   var btn=document.getElementById('go');
   btn.disabled=true;btn.textContent='正在生成…';
+  var box=document.getElementById('box');
+  box.innerHTML='<div class="banner">正在生成手续包，请稍候…</div>'
+    +'<div class="pbar-wrap"><div class="pbar" id="pbar"></div></div>'
+    +'<div class="ptext" id="ptext">准备中…</div>';
+  var pct=0,bar=document.getElementById('pbar'),txt=document.getElementById('ptext');
+  var steps=['正在解析邮件数据…','正在生成运单副本…','正在生成安检单…','正在生成应急措施…',
+    '正在生成托运人声明…','正在生成托书…','正在生成交运单…','正在生成危险品确认单…','正在校验…'];
+  var si=0;
+  var timer=setInterval(function(){{
+    pct+=Math.random()*6+2;if(pct>92)pct=92;
+    bar.style.width=pct.toFixed(0)+'%';
+    var idx=Math.min(Math.floor(pct/11),steps.length-1);
+    if(idx!==si){{si=idx;txt.textContent=steps[si];}}
+  }},500);
   fetch('{submit_url}',{{method:'POST',body:JSON.stringify(collect())}})
   .then(function(r){{return r.json();}})
   .then(function(j){{
-    var box=document.getElementById('box');
+    clearInterval(timer);
+    bar.style.width='100%';txt.textContent='生成完成！';
+    setTimeout(function(){{
     if(j.ok){{
       box.innerHTML='<div class="banner">已生成完成，正式核对单（含逐项校验结果）已打开，可关闭本页。</div>'
         +((j.notes&&j.notes.length)?('<div class="banner" style="background:#b45309">证书改动：'+j.notes.join('；')+'</div>'):'')
@@ -884,8 +903,10 @@ function go(){{
         +j.issues.map(function(i){{return '<li class="bad">'+i.replace(/</g,'&lt;')+'</li>';}}).join('')+'</ul>';
       btn.disabled=false;btn.textContent='确认生成';
     }}
+    }},600);
   }})
   .catch(function(e){{
+    clearInterval(timer);
     document.getElementById('box').innerHTML='<div class="banner" style="background:#b42318">提交失败：'+e+'（服务窗口可能已关闭）</div>';
     btn.disabled=false;btn.textContent='确认生成';
   }});
