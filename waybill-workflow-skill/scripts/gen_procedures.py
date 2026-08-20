@@ -26,8 +26,6 @@ OUT = os.path.join(os.path.dirname(ROOT), '出货手续包')
 
 # 安检单品名用宋体（对齐参考版 AdobeSongStd、半宽西文）。Windows 用系统宋体；
 # Linux 服务器把 simsun.ttc 放 templates/fonts/，或装思源宋体/文泉驿（按序找到即用）。
-# 注意：subset_fonts() 只对 TrueType(glyf) 轮廓有效；Noto CJK 是 CFF 轮廓会全量嵌入(20MB+)
-# 所以 TrueType 的 wqy/simsun 优先级高于 Noto。外观最接近参考版：simsun.ttc 放 templates/fonts/
 _FONT_CANDS = [
     r'C:/Windows/Fonts/simsun.ttc',
     os.path.join(ROOT, 'fonts', 'simsun.ttc'),
@@ -305,62 +303,74 @@ def make_yingji(master, info):
     return out
 
 # ================== 4. 托书（填品名） ==================
-def fill_tuoshū(master, info):
-    """参考版托书品名：英文段 5pt (251.7,357.2~429) + 中文段 4.8pt (251.7,435.4~464)"""
+def fill_tuoshū(master, info, consolidation=True):
+    """托书品名：每个机型单独一行（参考用户提供的实例格式）
+    consolidation=True 时英文段顶部加 'CONSOLIDATION AS PER ATTACHED MANIFEST'（用户要求默认有）。"""
     sdir = os.path.join(TMPL2, master + '模板')
     src = next(os.path.join(sdir, f) for f in os.listdir(sdir) if '托书' in f)
     doc = fitz.open(src)
     pg = doc[0]
-    # 品名区下界 y~470（中文段最后一行 464.2 底）
+    
     cn_list, en_list = goods_of(info)
-    # 英文段
-    en_text = EN_HEAD + ',' + ','.join(en_list) + '.' + EN_TAIL
     parts = parts_of(info)
     bpcs = info.get('bpcs', 0)
+    
+    # 构建英文段：每行一个机型
+    en_lines = []
+    if consolidation:
+        en_lines.append(EN_HEAD + ',')
+    for en in en_list:
+        en_lines.append(en + ',')
+    # 电池声明
     if bpcs:
-        seg = 'LITHIUM BATTERY %d PCS' % bpcs
+        en_lines.append('LITHIUM ION BATTERIES IN COMPLIANCE WITH SECTION II OF PI 967,')
         en_parts = [e for c, e in parts if e]
         if en_parts:
-            seg += ',' + ','.join(en_parts)
-        en_text += seg
-    helv = fitz.Font('helv')
-    font_en = fitz.Font('helv')  # 英文 helv 全角字符需 china-s，先按 helv
-    # 品名整盒 362.3~472（底横线 474）；英文段起 362.3，中文段紧跟英文段末（不缩时=参考版 440.3）；
-    # 两段总高超盒则按比例同缩字号/行距（下限 0.8 倍），保证不压线、不互撞
-    maxw = 575 - 251.7  # 英文段可用宽
-    BOX_TOP, BOX_BOT = 362.3, 472.0
-    cjkf = fitz.Font('china-s')
-    cn_text = ','.join(cn_list)
+            en_lines.append(','.join(en_parts) + ' LITHIUM BATTERY %d PCS' % bpcs)
+        else:
+            en_lines.append('LITHIUM BATTERY %d PCS' % bpcs)
+    
+    # 构建中文段：每行一个机型
+    cn_lines = []
+    for cn in cn_list:
+        cn_lines.append(cn + ',')
+    # 零件
     if parts:
-        cn_text += ',' + ','.join(c for c, e in parts) + ','
-    # 双向自适应：先试放大(≤1.1 倍)，放不下再按比例同缩(≥0.8 倍)
-    en_lines = cn_lines = None
-    for s in (1.1, 1.05, 1.0):
-        e = wrap_mixed(en_text, helv, 5.0 * s, maxw)
-        c = wrap_mixed(cn_text, cjkf, 4.8 * s, maxw)
-        if len(e) * 6.0 * s + len(c) * 5.8 * s <= BOX_BOT - BOX_TOP:
-            en_lines, cn_lines = e, c
-            fs_e, lh_e = 5.0 * s, 6.0 * s
-            fs_c, lh_c = 4.8 * s, 5.8 * s
-            break
-    if en_lines is None:
-        e = wrap_mixed(en_text, helv, 5.0, maxw)
-        c = wrap_mixed(cn_text, cjkf, 4.8, maxw)
-        sc = max(0.8, (BOX_BOT - BOX_TOP) / (len(e) * 6.0 + len(c) * 5.8))
-        fs_e, lh_e = 5.0 * sc, 6.0 * sc
-        fs_c, lh_c = 4.8 * sc, 5.8 * sc
-        en_lines = wrap_mixed(en_text, helv, fs_e, maxw)
-        cn_lines = wrap_mixed(cn_text, cjkf, fs_c, maxw)
+        cn_parts = [c for c, e in parts if c]
+        if cn_parts:
+            cn_lines.append(','.join(cn_parts))
+    
+    # 排版参数
+    helv = fitz.Font('helv')
+    cjkf = fitz.Font('china-s')
+    maxw = 575 - 251.7  # 可用宽度
+    BOX_TOP, BOX_BOT = 362.3, 472.0
+    
+    # 字号：英文 5pt，中文 4.8pt，行距 6pt
+    fs_e, lh_e = 5.0, 6.0
+    fs_c, lh_c = 4.8, 5.8
+    
+    # 如果总高度超盒，按比例缩放（下限 0.8 倍）
+    total_h = len(en_lines) * lh_e + len(cn_lines) * lh_c
+    if total_h > BOX_BOT - BOX_TOP:
+        sc = max(0.8, (BOX_BOT - BOX_TOP) / total_h)
+        fs_e, lh_e = fs_e * sc, lh_e * sc
+        fs_c, lh_c = fs_c * sc, lh_c * sc
+    
+    # 写入英文段
     y = BOX_TOP
     for line in en_lines:
         mixed_insert(pg, 251.7, y, line, fs_e)
         y += lh_e
+    
+    # 写入中文段
     for line in cn_lines:
         mixed_insert(pg, 251.7, y, line, fs_c)
         y += lh_c
-    out = os.path.join(OUT, master, master + '托书.pdf')  # 无空格
+    
+    out = os.path.join(OUT, master, master + '托书.pdf')
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    doc.subset_fonts()  # 嵌入字体只留用到的字符子集（否则 simsun/china-s 全量嵌入 3~17MB）
+    doc.subset_fonts()
     doc.save(out, garbage=3, deflate=True)
     doc.close()
     return out

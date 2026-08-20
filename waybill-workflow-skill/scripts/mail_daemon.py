@@ -27,7 +27,6 @@ import shutil
 import smtplib
 import sys
 import threading
-import time
 import zipfile
 from email.header import decode_header
 from email.mime.application import MIMEApplication
@@ -68,8 +67,8 @@ def load_config(path):
         'user': cp.get('mail', 'user'),
         'password': cp.get('mail', 'password'),  # QQ/163 用授权码
         'poll_sec': cp.getint('mail', 'poll_sec', fallback=60),
-        'filter_keywords': cp.get('mail', 'filter_keywords', fallback=''),   # 主题含任一关键词才处理；空=不过滤
-        'filter_froms': cp.get('mail', 'filter_froms', fallback=''),          # 发件人白名单（域名/邮箱片段，或关系）；空=不限
+        'filter_keywords': cp.get('mail', 'filter_keywords', fallback=''),
+        'filter_froms': cp.get('mail', 'filter_froms', fallback=''),
         'send_to': cp.get('server', 'send_to', fallback=''),      # 空=回给发件人
         'public_base': cp.get('server', 'public_base').rstrip('/'),
         'http_port': cp.getint('server', 'http_port', fallback=8080),
@@ -170,8 +169,7 @@ def extract_eml_files(msg, stamp):
             if not payload:
                 continue
             if fname.lower().endswith('.eml'):
-                safe_name = re.sub(r'[/\\:*?"<>|]', '_', fname)
-                p = os.path.join(WORK, f'{stamp}_{safe_name}')
+                p = os.path.join(WORK, f'{stamp}_{re.sub(r"[/\\:*?\"<>|]", "_", fname)}')
                 open(p, 'wb').write(payload)
                 found.append(p)
             elif part.get_content_type() == 'application/octet-stream' and \
@@ -216,9 +214,9 @@ def smtp_send(cfg, to, subject, html, files=(), in_reply_to=None):
                        filename=('utf-8', '', os.path.basename(path)))
         msg.attach(att)
     if cfg['smtp_port'] == 465:
-        s = smtplib.SMTP_SSL(cfg['smtp_host'], cfg['smtp_port'], timeout=300)
+        s = smtplib.SMTP_SSL(cfg['smtp_host'], cfg['smtp_port'], timeout=60)
     else:
-        s = smtplib.SMTP(cfg['smtp_host'], cfg['smtp_port'], timeout=300)
+        s = smtplib.SMTP(cfg['smtp_host'], cfg['smtp_port'], timeout=60)
         s.starttls()
     s.login(cfg['user'], cfg['password'])
     s.sendmail(cfg['user'], [to], msg.as_string())
@@ -274,6 +272,17 @@ def result_html(ok, masters, report_html):
 </body></html>"""
 
 
+def confirm_mail_html(base_url, token, masters):
+    url = f'{base_url}/t/{token}/confirm'
+    return f"""<html><body style="font-family:'Microsoft YaHei',sans-serif">
+<div style="padding:10px 14px;color:#fff;background:#1a7f37;border-radius:6px;font-size:15px">
+订舱邮件信息齐全，待人工确认生成手续包　|　主单：{', '.join(masters)}（{len(masters)} 个 × 7 份）</div>
+<p>请打开下面的链接，核对各主单 HAWB/件重/机型/鉴定证书编号（可直接修改）后点「确认生成」，手续包才会生成并回信：</p>
+<p><a href="{url}" style="font-size:16px">{url}</a></p>
+<p style="color:#666;font-size:12px">未确认不会生成任何文件；点「取消」则不生成。链接长期有效。</p>
+</body></html>"""
+
+
 def fill_mail_html(base_url, token, issues):
     url = f'{base_url}/t/{token}/'
     li = ''.join(f'<li>{rp.esc(i)}</li>' for i in issues)
@@ -284,17 +293,6 @@ def fill_mail_html(base_url, token, issues):
 <p><a href="{url}" style="font-size:16px">{url}</a></p>
 <ul>{li}</ul>
 <p style="color:#666;font-size:12px">链接长期有效，随时可打开继续填写。</p>
-</body></html>"""
-
-
-def confirm_mail_html(base_url, token, masters):
-    url = f'{base_url}/t/{token}/confirm'
-    return f"""<html><body style="font-family:'Microsoft YaHei',sans-serif">
-<div style="padding:10px 14px;color:#fff;background:#1a7f37;border-radius:6px;font-size:15px">
-订舱邮件信息齐全，待人工确认生成手续包　|　主单：{', '.join(masters)}（{len(masters)} 个 × 7 份）</div>
-<p>请打开下面的链接，核对各主单 HAWB/件重/机型/鉴定证书编号（可直接修改）后点「确认生成」，手续包才会生成并回信：</p>
-<p><a href="{url}" style="font-size:16px">{url}</a></p>
-<p style="color:#666;font-size:12px">未确认不会生成任何文件；点「取消」则不生成。链接长期有效。</p>
 </body></html>"""
 
 
@@ -400,26 +398,22 @@ class TokenHandler(http.server.BaseHTTPRequestHandler):
         """nginx 反代前缀（如 /dsv），用于页面 JS 拼接 fetch 绝对路径。"""
         return urlparse(CFG['public_base']).path.rstrip('/')
 
-    def _job(self, token):
-        with JOBS_LOCK:
-            return JOBS.get(token)
-
     def do_GET(self):
         m = re.match(r'^/t/([\w-]+)(/confirm)?/?$', self.path)
         if not m:
             return self._send(404, 'not found', 'text/plain')
-        token = m.group(1)
-        job = self._job(token)
+        with JOBS_LOCK:
+            job = JOBS.get(m.group(1))
         if not job:
             return self._send(404, '该链接不存在或已处理完成', 'text/plain')
-        base = self._path() + f'/t/{token}'
-        if m.group(2):  # /confirm 生成前核对单
-            page = rp.build_confirm_html(job['st'], base_url=base)
-        else:           # 补充页
-            page = rp.build_form_html(
-                job['st'], job['issues'], 0,
-                ok_msg='校验通过，即将打开「生成前核对单」——请核对信息后点「确认生成」，完成后结果将发到您的邮箱。',
-                base_url=base)
+        base = self._path() + f'/t/{m.group(1)}'
+        if m.group(2):  # /confirm 生成前核对单（人工确认）
+            page = rp.build_confirm_html(job['st'], 0, base_url=base)
+            return self._send(200, page)
+        page = rp.build_form_html(
+            job['st'], job['issues'], 0,
+            ok_msg='校验通过，即将打开「生成前核对单」——请核对信息后点「确认生成」，完成后结果将发到您的邮箱。',
+            base_url=base)
         self._send(200, page)
 
     def do_POST(self):
@@ -427,7 +421,8 @@ class TokenHandler(http.server.BaseHTTPRequestHandler):
         if not m:
             return self._send(404, 'not found', 'text/plain')
         token, action = m.group(1), m.group(2)
-        job = self._job(token)
+        with JOBS_LOCK:
+            job = JOBS.get(token)
         if not job:
             return self._send(404, json.dumps({'ok': False, 'issues': ['链接不存在或已处理完成']},
                                               ensure_ascii=False), 'application/json')
@@ -480,16 +475,15 @@ class TokenHandler(http.server.BaseHTTPRequestHandler):
         try:
             patch = json.loads(self.rfile.read(n).decode('utf-8')) if n else {}
         except Exception:
-            return self._send(400, json.dumps({'ok': False, 'issues': ['输入解析失败']},
+            return self._send(400, json.dumps({'ok': False, 'issues': ['补充输入解析失败']},
                                               ensure_ascii=False), 'application/json')
-
-        if action == 'submit':
-            # 补充页提交：合并补充数据，闸门全过后进「生成前核对单」待人工确认（不直接生成）
-            try:
-                st['certs'] = bw.load_certs(rp.XLSX)
-            except Exception:
-                pass
-            rp.apply_patch(st, patch)
+        try:
+            st['certs'] = bw.load_certs(rp.XLSX)
+        except Exception:
+            pass
+        if action == 'confirm_submit':
+            # 确认页提交：证书编号可改，确认后才生成+回信
+            notes = rp.apply_cert_edits(st, patch.get('certs') or {})
             rp.rebuild_state(st)
             remain = server_issues(rp.collect_gate_issues(st))
             if remain:
@@ -497,14 +491,14 @@ class TokenHandler(http.server.BaseHTTPRequestHandler):
                 jobs_dump()
                 return self._send(200, json.dumps({'ok': False, 'issues': remain},
                                                   ensure_ascii=False), 'application/json')
-            # 全过 → 跳确认页
-            return self._send(200, json.dumps(
-                {'ok': False, 'confirm': True,
-                 'confirm_url': self._path() + f'/t/{token}/confirm'},
-                ensure_ascii=False), 'application/json')
-
-        # confirm_submit：确认页提交（证书编号可改），确认后才生成+回信
-        notes = rp.apply_cert_edits(st, patch.get('certs') or {})
+            err = finish_job(token)
+            if err:
+                return self._send(200, json.dumps({'ok': False, 'issues': [err]},
+                                                  ensure_ascii=False), 'application/json')
+            self._send(200, json.dumps({'ok': True, 'notes': notes}, ensure_ascii=False),
+                       'application/json')
+            return
+        rp.apply_patch(st, patch)
         rp.rebuild_state(st)
         remain = server_issues(rp.collect_gate_issues(st))
         if remain:
@@ -512,14 +506,11 @@ class TokenHandler(http.server.BaseHTTPRequestHandler):
             jobs_dump()
             return self._send(200, json.dumps({'ok': False, 'issues': remain},
                                               ensure_ascii=False), 'application/json')
-        err = finish_job(token)
-        if err:
-            return self._send(200, json.dumps({'ok': False, 'issues': [err]},
-                                              ensure_ascii=False), 'application/json')
-        self._send(200, json.dumps({'ok': True, 'notes': notes}, ensure_ascii=False), 'application/json')
-
-
-FINISH_LOCK = threading.Lock()  # 确认生成全局串行锁（防并发确认互相竞争写文件）
+        # 闸门全过 → 打开生成前核对单（人工确认后才生成）
+        self._send(200, json.dumps(
+            {'ok': False, 'confirm': True,
+             'confirm_url': self._path() + f'/t/{token}/confirm'},
+            ensure_ascii=False), 'application/json')
 
 
 def finish_job(token):
@@ -528,10 +519,6 @@ def finish_job(token):
         job = JOBS.get(token)
     if not job:
         return '任务不存在'
-    if job.get('busy'):
-        return '该任务正在生成中，请稍候查看邮箱'
-    with JOBS_LOCK:
-        job['busy'] = True
     try:
         st = job['st']
         masters = list(st['masters_all'].keys())
@@ -546,8 +533,6 @@ def finish_job(token):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        with JOBS_LOCK:
-            job['busy'] = False
         return f'生成报错：{e}'
     with JOBS_LOCK:
         JOBS.pop(token, None)
@@ -574,13 +559,8 @@ def retry_pending_jobs(cfg):
         if remain:
             job['issues'] = remain  # 补充页显示最新缺项
             continue
-        job['issues'] = []  # 待确认状态
-        masters = list(st['masters_all'].keys())
-        log(f"  [自动补齐] 任务 /t/{tok}/ 闸门已过（模板/信息到位），回信确认链接")
-        smtp_send(cfg, job['to'],
-                  f"请确认生成手续包（{len(masters)} 个主单）：{job['subject'][:30]}",
-                  confirm_mail_html(cfg['public_base'], tok, masters),
-                  in_reply_to=job['msg_id'])
+        log(f"  [自动补齐] 任务 /t/{tok}/ 闸门已过（模板/信息到位），直接生成回信")
+        finish_job(tok)
     jobs_dump()
 
 
@@ -591,34 +571,11 @@ def serve_tokens(port):
     srv.serve_forever()
 
 
-# ================== 每日清理 ==================
-def cleanup_loop():
-    """每天 03:00 清理出货手续包生成产物（主单目录/存档/邮件落盘/核对单），保留任务状态文件。"""
-    while True:
-        now = datetime.datetime.now()
-        nxt = now.replace(hour=3, minute=0, second=0, microsecond=0)
-        if nxt <= now:
-            nxt += datetime.timedelta(days=1)
-        time.sleep((nxt - now).total_seconds())
-        try:
-            removed = 0
-            for name in sorted(os.listdir(OUT)):
-                if name in ('_daemon_jobs.json', '_daemon_state.json'):
-                    continue
-                p = os.path.join(OUT, name)
-                if os.path.isdir(p):
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    os.remove(p)
-                removed += 1
-            log(f"[清理] 出货手续包生成产物已清理 {removed} 项")
-        except Exception as e:
-            log(f"  [警告] 清理失败：{e}")
-
-
 # ================== 单封邮件处理 ==================
 # 服务自己回信的 SMTP 副本主题前缀（QQ 自收自发会进收件箱，误判为订舱邮件会无限循环）
-REPLY_PREFIXES = ('订舱邮件无法自动处理', '手续包需要补充', '出货手续包已生成', '模板已收到并入库', '请确认生成手续包')
+REPLY_PREFIXES = ('订舱邮件无法自动处理', '手续包需要补充', '出货手续包已生成',
+                  '模板已收到并入库', '请确认生成手续包')
+
 
 def should_process(cfg, msg):
     """过滤：主题含关键词或发件人命中白名单才处理；两者都未配置=全处理（原行为）。"""
@@ -633,6 +590,7 @@ def should_process(cfg, msg):
     if kw and any(k in subj.lower() for k in kw):
         return True
     return not kw and not wl
+
 
 def process_message(cfg, msg):
     """处理一封收到的邮件：落盘→模板附件→跑管线→按结果回信。"""
@@ -674,17 +632,16 @@ def process_message(cfg, msg):
         smtp_send(cfg, to, f"手续包需要补充 {len(issues)} 项信息：{subject[:30]}",
                   fill_mail_html(base, token, issues), in_reply_to=msg_id)
         return
-    # ready：信息齐全 → 建任务待人工确认（不直接生成，需点「确认生成」）
+    # ready：信息齐全 → 回信确认链接，人工确认后才生成
     st = res['st']
-    masters = list(st['masters_all'].keys())
     token = secrets.token_urlsafe(12)
+    masters = list(st['masters_all'].keys())
     with JOBS_LOCK:
         JOBS[token] = {'st': st, 'issues': [], 'to': to,
                        'msg_id': msg_id, 'subject': subject}
     jobs_dump()
     log(f"  [结果] 信息齐全，回信确认链接 /t/{token}/confirm")
-    smtp_send(cfg, to,
-              f"请确认生成手续包（{len(masters)} 个主单）：{subject[:30]}",
+    smtp_send(cfg, to, f"请确认生成手续包（{len(masters)} 个主单）：{subject[:30]}",
               confirm_mail_html(base, token, masters), in_reply_to=msg_id)
 
 
@@ -697,7 +654,10 @@ def poll_loop(cfg, state):
             log(f"[IMAP] 已连接 {cfg['imap_host']}，开始轮询（每 {cfg['poll_sec']}s）")
             box.select('INBOX')
             while True:
-                typ, data = box.uid('search', None, 'UNSEEN')
+                # 搜最近 3 天全部邮件（含已读）：QQ 邮箱会把转发件标成已读，
+                # 只看 UNSEEN 会漏掉 → 用 seen 列表去重，已读未处理的一样处理
+                since = (datetime.date.today() - datetime.timedelta(days=3)).strftime('%d-%b-%Y')
+                typ, data = box.uid('search', None, 'SINCE', since)
                 uids = (data[0] or b'').split() if typ == 'OK' else []
                 for uid in uids:
                     uid_s = uid.decode()
@@ -710,7 +670,7 @@ def poll_loop(cfg, state):
                     try:
                         msg = email.message_from_bytes(md[0][1])
                         if not should_process(cfg, msg):
-                            log(f"  [跳过] 非订舱邮件（无关键词/白名单命中）：{hdr(msg, 'Subject') or ''[:40]}")
+                            log(f"  [跳过] 非订舱邮件（无关键词/白名单命中）：{(hdr(msg, 'Subject') or '')[:40]}")
                             state['seen'].append(uid_s)
                             save_state(state)
                             box.uid('store', uid, '+FLAGS', '\\Seen')
@@ -744,7 +704,6 @@ def main():
     state = load_state()
     jobs_load()
     threading.Thread(target=serve_tokens, args=(CFG['http_port'],), daemon=True).start()
-    threading.Thread(target=cleanup_loop, daemon=True).start()
     poll_loop(CFG, state)
 
 

@@ -55,7 +55,10 @@ def parse_email(path):
     master_re = re.compile(r"\d{3}-\s*\d{8}")   # 横线后可能有空格：176- 61333915
     hawb_re = re.compile(r"(TYN\d+)")
     # 件数/计费/毛重 三元组，后接尺寸括号行作锚（避免误配预报单号/航班行；尺寸行行首允许空格）
-    triple_re = re.compile(r"(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s*\n\s*\(")
+    # 兼容计费列为空的两数字格式（件数 毛重 或 件数 计费 毛重）：
+    # 匹配 件数 [计费] 毛重 后跟换行+左括号；毛重允许小数
+    triple_re = re.compile(
+        r"(\d+)\s+(?:\d+(?:\.\d+)?\s+)?(\d+(?:\.\d+)?)\s*\n\s*\(")
     for blk in blocks:
         ms = master_re.findall(blk)
         master = re.sub(r"\s", "", ms[-1]) if ms else None  # 段内最后一个主单号
@@ -67,7 +70,7 @@ def parse_email(path):
             hawb = hm.group(1)
             tr = triple_re.findall(prefix)
             pcs = int(tr[-1][0]) if tr else None
-            wt = float(tr[-1][2]) if tr else None
+            wt = float(tr[-1][1]) if tr else None
             # 区域止于下一个 HAWB（报关行不一定是泽坤，不能按泽坤切）
             nxt = hms[i + 1].start() if i + 1 < len(hms) else len(blk)
             region = blk[hm.end():nxt]
@@ -76,27 +79,21 @@ def parse_email(path):
                    else "phone" if is_battery else None)
             # 机型在「含电池」标记后的描述里，无分号也兼容：直接取全部 A\d{4}
             models = list(dict.fromkeys(re.findall(r"[A-Z]\d{4}", region))) if is_battery else []
-            # 非电池分单=零件行：带 HS 编码的行取 (中文品名, 英文品名) 对
-            # 中文=首个中文词组；英文=SVC … 标记，无则取行末纯字母段大写（speaker→SPEAKER）
+            # 非电池分单=零件行：在整个 region 里找所有 (中文品名，SVC xxx) 对
             parts = []
             if not is_battery:
                 seen_cn = set()
-                for ln in region.split("\n"):
-                    if "HS" not in ln:
-                        continue
-                    mcn = re.search(r"[一-鿿]{2,}", ln)
+                # 找所有 SVC xxx 标记，向前取中文品名
+                for men in re.finditer(r'SVC [A-Z0-9]+(?: [A-Z0-9]+)*', region):
+                    # 向前找最近的中文词组（在 SVC 之前）
+                    prefix = region[max(0, men.start()-50):men.start()]
+                    mcn = None
+                    for m in re.finditer(r'[\u4e00-\u9fff]{2,}', prefix):
+                        mcn = m  # 取最后一个（最近的）
                     if not mcn or mcn.group(0) in seen_cn:
                         continue
                     cn = mcn.group(0)
-                    men = re.search(r"SVC [A-Z0-9]+(?: [A-Z0-9]+)*", ln)
-                    if men:
-                        en = men.group(0)
-                    else:
-                        en = ""
-                        for t in reversed([t.strip() for t in ln.replace("，", ",").split(",")]):
-                            if t and re.fullmatch(r"[A-Za-z ]+", t):
-                                en = t.upper()
-                                break
+                    en = men.group(0)
                     seen_cn.add(cn)
                     parts.append([cn, en])
             recs.append({
@@ -110,7 +107,23 @@ def parse_email(path):
                 "parts": parts,
                 "desc": re.sub(r"\s+", " ", region).strip()[:120],
             })
-    return recs
+    # 去重+清理：转发链有多层表格区块时同 (master,hawb) 会解析出多条；
+    # ① 件数 ≥10万 的行是预报单号误当件数（如 1000067010），直接丢弃；
+    # ② 同 (master,hawb) 保留件数合理的那条（1-9999）
+    recs = [r for r in recs
+            if not (isinstance(r['pcs'], int) and r['pcs'] >= 100000)]
+    seen = {}
+    for r in recs:
+        key = (r['master'], r['hawb'])
+        cur = seen.get(key)
+        if cur is None:
+            seen[key] = r
+            continue
+        cur_pcs = cur['pcs'] if isinstance(cur['pcs'], int) else -1
+        new_pcs = r['pcs'] if isinstance(r['pcs'], int) else -1
+        if 0 < new_pcs < 10000 and not (0 < cur_pcs < 10000):
+            seen[key] = r
+    return list(seen.values())
 
 
 def load_certs(xlsx):
@@ -223,11 +236,16 @@ def build_entries(recs, scope, certs, overrides=None):
     两属机型两类各一条；scope 外的主单不处理。
     overrides：{机型: 证书} 人工指定映射（核对单改过证书编号），优先于 xlsx 自动匹配。"""
     out, seen = {}, {}
+    seen_hawb = set()  # 和 build_masters 保持一致：同一分单只取首次出现的主单
     for r in recs:
         if not r["master"] or not r["is_battery"]:
             continue
         if scope is not None and r["master"] not in scope:
             continue
+        if r["hawb"] in seen_hawb:
+            continue
+        if r["hawb"]:
+            seen_hawb.add(r["hawb"])
         lst = out.setdefault(r["master"], [])
         se = seen.setdefault(r["master"], set())
         for mdl in r["models"]:

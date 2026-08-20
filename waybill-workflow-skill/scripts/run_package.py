@@ -341,18 +341,55 @@ def collect_gate_issues(st):
 
 
 def apply_patch(st, patch):
-    """合并页面补充输入：meta / 分单件重与机型 / 手工鉴定证书。"""
+    """合并页面补充输入：meta / 分单件重与机型 / 手工鉴定证书 / 删除分单与机型。"""
     m = patch.get('meta') or {}
     for k in ('dest', 'flight', 'date'):
         v = str(m.get(k) or '').strip()
         if v:
             st['meta'][k] = v
+    # 托书顶部 CONSOLIDATION 声明（默认开）
+    if 'consolidation' in m:
+        st['meta']['consolidation'] = bool(m.get('consolidation'))
+    elif 'consolidation' not in st['meta']:
+        st['meta']['consolidation'] = True
     if st['meta'].get('flight'):
         st['meta']['carrier'] = st['meta']['flight'][:2]
+    # 删除分单：按行号删除对应行（前端传 [{ri, hawb}]，重复 hawb 也只会删点击的那一行）
+    del_recs = patch.get('del', {}).get('recs') or []
+    if del_recs:
+        rows = []  # 与 build_form_html 相同的渲染顺序：per_eml -> recs（跳过无主单/scope外）
+        for eml, body, msg, recs, sc in st['per_eml']:
+            for r in recs:
+                if not (r['master'] and r['hawb']):
+                    continue
+                if sc is not None and r['master'] not in sc:
+                    continue
+                rows.append(r)
+        del_idx = {int(d['ri']) for d in del_recs}
+        for ri in sorted(del_idx, reverse=True):
+            if 0 <= ri < len(rows):
+                target = rows[ri]
+                for eml, body, msg, recs, sc in st['per_eml']:
+                    recs[:] = [r for r in recs if r is not target]
+    # 删除机型：从所有分单 models 移除（证书行残留不影响，masters 不再引用）
+    del_mdls = set(patch.get('del', {}).get('mdls') or [])
+    if del_mdls:
+        for eml, body, msg, recs, sc in st['per_eml']:
+            for r in recs:
+                r['models'] = [x for x in r['models'] if x not in del_mdls]
     for hawb, f in (patch.get('recs') or {}).items():
         for r in st['recs_all']:
             if r['hawb'] != hawb:
                 continue
+            v = str(f.get('master') or '').strip()
+            if v:
+                r['master'] = v
+            v = str(f.get('hawb') or '').strip()
+            if v:
+                r['hawb'] = v
+            v = str(f.get('is_battery') or '').strip()
+            if v in ('1', '0'):
+                r['is_battery'] = (v == '1')
             v = str(f.get('pcs') or '').strip()
             if v:
                 try:
@@ -438,12 +475,13 @@ def do_generate(st):
                          'pcs': sum(h[1] for h in ent['hawbs']),
                          'hawbs': ent['hawbs']}
     all_checks = {}
+    consolidation = bool(meta.get('consolidation', True))  # 托书顶部 CONSOLIDATION 声明（默认开）
     for master, info in gp.MASTERS.items():
         print(f"---- 生成 {master} ----")
         gp.make_shengming(master, info)
         gp.make_anxian(master, info)
         gp.make_yingji(master, info)
-        gp.fill_tuoshū(master, info)
+        gp.fill_tuoshū(master, info, consolidation=consolidation)
         gp.fill_waybill(master, info)
         gp.fill_jiaoyun(master, info)
         gp.make_weixian(master, info)
@@ -476,6 +514,11 @@ th,td{{border:1px solid #bbb;padding:4px 8px;text-align:left;vertical-align:top}
 th{{background:#f0f0f0}}
 input{{font-size:13px;padding:3px 5px;border:1px solid #999;border-radius:3px}}
 input.miss{{background:#fdecea;border-color:#b42318}}
+select{{font-size:13px;padding:3px 5px;border:1px solid #999;border-radius:3px}}
+.delbtn{{font-size:12px;padding:3px 10px;background:#dc2626;color:#fff;border:none;border-radius:4px;cursor:pointer}}
+.delbtn:hover{{background:#b91c1c}}
+tr.del{{background:#fee2e2;color:#aaa}}
+tr.del input,tr.del select{{background:#fee2e2}}
 .tip{{font-size:12px;color:#666;margin:4px 0 10px;line-height:1.6}}
 button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:10px 0}}
 .bad{{color:#b42318;font-weight:bold}} .ok{{color:#1a7f37;font-weight:bold}}
@@ -489,10 +532,14 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
 <th>目的站（三字母）</th><td><input id="m-dest" value="{escq(meta.get('dest',''))}" size="10" class="{'miss' if not meta.get('dest') else ''}" placeholder="如 RUH"></td>
 <th>航班</th><td><input id="m-flight" value="{escq(meta.get('flight',''))}" size="10" class="{'miss' if not meta.get('flight') else ''}" placeholder="如 EK309"></td>
 <th>运输日期</th><td><input id="m-date" value="{escq(meta.get('date',''))}" size="14" class="{'miss' if not meta.get('date') else ''}" placeholder="如 2026-08-16"></td>
+</tr><tr>
+<th>托书声明</th><td colspan="3"><label style="font-weight:normal;font-size:13px;cursor:pointer"><input type="checkbox" id="m-consolidation" {'checked' if meta.get('consolidation', True) else ''}> 托书顶部加「CONSOLIDATION AS PER ATTACHED MANIFEST」（默认勾选）</label></td>
 </tr></table>"""]
     h.append("<h2>② 分单件数/毛重/机型（G2）</h2>"
+             "<div class='tip'>可修改主单/分单号、含电池标记、件数、毛重、机型；不需要的分单点「删除」移除。</div>"
              "<table><tr><th>主单</th><th>分单</th><th>含电池</th>"
-             "<th>件数</th><th>毛重</th><th>机型（逗号分隔）</th></tr>")
+             "<th>件数</th><th>毛重</th><th>机型（逗号分隔）</th><th>操作</th></tr>")
+    ri = 0
     for eml, body, msg, recs, sc in st['per_eml']:
         for r in recs:
             if not (r['master'] and r['hawb']):
@@ -502,11 +549,18 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
             pcs_miss = 'miss' if r['pcs'] is None else ''
             wt_miss = 'miss' if r['wt'] is None else ''
             mdl_miss = 'miss' if r['is_battery'] and not r['models'] else ''
-            h.append(f"<tr><td>{esc(r['master'])}</td><td>{esc(r['hawb'])}</td>"
-                     f"<td>{'是' if r['is_battery'] else '否'}</td>"
-                     f"<td><input data-rec='{escq(r['hawb'])}' data-field='pcs' size='4' class='{pcs_miss}' value='{'' if r['pcs'] is None else r['pcs']}'></td>"
-                     f"<td><input data-rec='{escq(r['hawb'])}' data-field='wt' size='6' class='{wt_miss}' value='{'' if r['wt'] is None else r['wt']}'></td>"
-                     f"<td><input data-rec='{escq(r['hawb'])}' data-field='models' size='28' class='{mdl_miss}' value='{escq(','.join(r['models']))}' placeholder='如 A2636,A2881'></td></tr>")
+            bat_opts = ''.join(
+                f"<option value='1'{' selected' if r['is_battery'] else ''}>是</option>"
+                f"<option value='0'{' selected' if not r['is_battery'] else ''}>否</option>")
+            h.append(f"<tr id='rec-{ri}'>"
+                     f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='master' size='14' value='{escq(r['master'])}'></td>"
+                     f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='hawb' size='14' value='{escq(r['hawb'])}'></td>"
+                     f"<td><select data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='is_battery'>{bat_opts}</select></td>"
+                     f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='pcs' size='4' class='{pcs_miss}' value='{'' if r['pcs'] is None else r['pcs']}'></td>"
+                     f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='wt' size='6' class='{wt_miss}' value='{'' if r['wt'] is None else r['wt']}'></td>"
+                     f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='models' size='28' class='{mdl_miss}' value='{escq(','.join(r['models']))}' placeholder='如 A2636,A2881'></td>"
+                     f"<td><button type='button' class='delbtn' onclick='delRec({ri})'>删除</button></td></tr>")
+            ri += 1
     h.append("</table>")
     allm = sorted({m for ent in st['masters_all'].values() for m in ent['models']})
     h.append("<h2>③ 机型鉴定信息（G4/G5）</h2>"
@@ -514,15 +568,17 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
              "中文品名须以「数字式手机」/「5G数字移动电话机」开头（模组变体以「手机模组」开头），"
              "且包含「内置聚合物锂离子电池 + 电池型号、电压/容量/Wh」（托运人声明从这里反提电池型号）；"
              "英文品名以 DIGITAL CELLPHONE / 5G DIGITAL MOBILE PHONE FOR RADIOTELEPHONY 开头。</div>"
-             "<table><tr><th>机型</th><th>证书编号</th><th>中文品名</th><th>英文品名</th><th>状态</th></tr>")
+             "<table><tr><th>机型</th><th>证书编号</th><th>中文品名</th><th>英文品名</th><th>状态</th><th>操作</th></tr>")
     for mdl in allm:
         c = st['model2cert'].get(mdl)
         miss = '' if c else 'miss'
-        h.append(f"<tr><td>{mdl}</td>"
+        h.append(f"<tr id='mdl-{mdl}'>"
+                 f"<td>{mdl}</td>"
                  f"<td><input data-model='{mdl}' data-field='code' size='14' class='{miss}' value='{escq(c['code']) if c else ''}'></td>"
                  f"<td><input data-model='{mdl}' data-field='cn' size='48' class='{miss}' value='{escq(c['cn']) if c else ''}'></td>"
                  f"<td><input data-model='{mdl}' data-field='en' size='48' class='{miss}' value='{escq(c['en']) if c else ''}'></td>"
-                 f"<td class={'ok' if c else 'bad'}>{'已匹配' if c else '需补充'}</td></tr>")
+                 f"<td class={'ok' if c else 'bad'}>{'已匹配' if c else '需补充'}</td>"
+                 f"<td><button type='button' class='delbtn' onclick='delMdl(\"{mdl}\")'>删除</button></td></tr>")
     h.append("</table>")
     h.append("<h2>④ 模板文件（G5，缺模板时可直接上传，也可发邮件附件）</h2>")
     miss_t = []
@@ -537,21 +593,19 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
             for m in miss_t) + "</ul>")
     else:
         h.append("<p class='ok'>模板齐全。</p>")
-    h.append("""<p><input type="file" id="tpl" multiple accept="application/pdf,.pdf"> <button id="up" onclick="upload()">上传模板</button> <span id="uptip" style="font-size:12px;color:#666"></span></p>\n    <p class="tip">文件名为「主单号+托书.pdf / 主单号+运单副本.pdf」（如 176-61333915托书.pdf），一次可传多个；入库后自动重新校验。</p>\n    <button id="go" onclick="submit()">补充并重新校验</button>
+    h.append("""<p><input type="file" id="tpl" multiple accept="application/pdf,.pdf"> <button id="up" onclick="upload()">上传模板</button> <span id="uptip" style="font-size:12px;color:#666"></span></p>
+    <p class="tip">文件名为「主单号+托书.pdf / 主单号+运单副本.pdf」（如 176-61333915托书.pdf），一次可传多个；入库后自动重新校验。</p>
+    <button id="go" onclick="submit()">补充并重新校验</button>
 <script>
-function collect(){
-  var d={meta:{},recs:{},certs:{}};
-  d.meta.dest=document.getElementById('m-dest').value;
-  d.meta.flight=document.getElementById('m-flight').value;
-  d.meta.date=document.getElementById('m-date').value;
-  document.querySelectorAll('input[data-rec]').forEach(function(i){
-    if(!d.recs[i.dataset.rec])d.recs[i.dataset.rec]={};
-    d.recs[i.dataset.rec][i.dataset.field]=i.value;});
-  document.querySelectorAll('input[data-model]').forEach(function(i){
-    if(!d.certs[i.dataset.model])d.certs[i.dataset.model]={};
-    d.certs[i.dataset.model][i.dataset.field]=i.value;});
-  return d;
+var DEL={recs:{},mdls:{}};
+function delRec(ri){
+  var r=document.getElementById('rec-'+ri);
+  if(!r)return;
+  var hb=(r.querySelector('input[data-field=hawb]')||{}).value||r.getAttribute('data-hawb')||'';
+  DEL.recs[ri]=hb;
+  r.className='del';
 }
+function delMdl(m){DEL.mdls[m]=1;var r=document.getElementById('mdl-'+m);if(r)r.className='del';}
 function upload(){
   var f=document.getElementById('tpl');
   if(!f.files.length){document.getElementById('uptip').textContent='请先选择 PDF 文件';return;}
@@ -578,18 +632,45 @@ function upload(){
     document.getElementById('uptip').textContent='上传失败：'+e;
   });
 }
+function collect(){
+  var d={meta:{},recs:{},certs:{},del:{recs:[],mdls:[]}};
+  d.meta.dest=document.getElementById('m-dest').value;
+  d.meta.consolidation=document.getElementById('m-consolidation').checked;
+  d.meta.flight=document.getElementById('m-flight').value;
+  d.meta.date=document.getElementById('m-date').value;
+  document.querySelectorAll('input[data-rec]').forEach(function(i){
+    var ri=i.dataset.ri;
+    if(DEL.recs[ri])return;
+    var h=i.dataset.rec;
+    if(!d.recs[h])d.recs[h]={};
+    d.recs[h][i.dataset.field]=i.value;});
+  document.querySelectorAll('select[data-rec]').forEach(function(i){
+    var ri=i.dataset.ri;
+    if(DEL.recs[ri])return;
+    var h=i.dataset.rec;
+    if(!d.recs[h])d.recs[h]={};
+    d.recs[h][i.dataset.field]=i.value;});
+  document.querySelectorAll('input[data-model]').forEach(function(i){
+    if(DEL.mdls[i.dataset.model])return;
+    if(!d.certs[i.dataset.model])d.certs[i.dataset.model]={};
+    d.certs[i.dataset.model][i.dataset.field]=i.value;});
+  d.del.recs=Object.keys(DEL.recs).map(function(ri){return {ri:parseInt(ri),hawb:DEL.recs[ri]};});
+  d.del.mdls=Object.keys(DEL.mdls);
+  return d;
+}
 function submit(){
   var btn=document.getElementById('go');
-  btn.disabled=true;btn.textContent='校验并生成中…';
+  btn.disabled=true;btn.textContent='校验中…';
   fetch('__SUBMIT_URL__',{method:'POST',body:JSON.stringify(collect())})
   .then(function(r){return r.json();})
   .then(function(j){
     var box=document.getElementById('issues');
-    if(j.confirm){window.location.href=j.confirm_url;return;}
     if(j.ok){
       box.innerHTML='<div class="banner" style="background:#1a7f37">__OK_MSG__</div>';
       document.querySelectorAll('input').forEach(function(e){e.disabled=true;});
       btn.style.display='none';
+    }else if(j.confirm&&j.confirm_url){
+      window.location.href=j.confirm_url;
     }else{
       box.innerHTML='<div class="banner">仍有 '+j.issues.length+' 项缺失/异常，请继续补充</div><ul>'
         +j.issues.map(function(i){return '<li>'+i.replace(/</g,'&lt;')+'</li>';}).join('')+'</ul>';
@@ -689,7 +770,7 @@ def serve_fill_form(st, issues):
 def build_confirm_html(st, port=0, base_url=None):
     """生成前核对单：展示全部解析结果，机型鉴定证书编号可改，确认后才生成。"""
     meta = st['meta']
-    if base_url is not None:
+    if base_url:
         submit_url = base_url.rstrip('/') + '/confirm_submit'
         cancel_url = base_url.rstrip('/') + '/cancel'
     else:
