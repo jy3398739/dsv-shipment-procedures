@@ -524,6 +524,7 @@ select{{font-size:13px;padding:3px 5px;border:1px solid #999;border-radius:3px}}
 .rstbtn:hover{{background:#166534}}
 tr.del{{background:#fee2e2;color:#aaa}}
 tr.del input,tr.del select{{background:#fee2e2}}
+tr.sep td{{background:#e0e7ff;font-weight:bold;font-size:13px;padding:6px 8px;border-top:2px solid #6366f1}}
 .tip{{font-size:12px;color:#666;margin:4px 0 10px;line-height:1.6}}
 button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:10px 0}}
 .bad{{color:#b42318;font-weight:bold}} .ok{{color:#1a7f37;font-weight:bold}}
@@ -545,12 +546,17 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
              "<table><tr><th>主单</th><th>分单</th><th>含电池</th><th>品类</th>"
              "<th>件数</th><th>毛重</th><th>机型（逗号分隔）</th><th>操作</th></tr>")
     ri = 0
+    prev_master = None
     for eml, body, msg, recs, sc in st['per_eml']:
         for r in recs:
             if not (r['master'] and r['hawb']):
                 continue
             if sc is not None and r['master'] not in sc:
                 continue
+            if r['master'] != prev_master:
+                cols = 8  # 总列数
+                h.append(f"<tr class='sep'><td colspan='{cols}'>主单 {esc(r['master'])}</td></tr>")
+                prev_master = r['master']
             pcs_miss = 'miss' if r['pcs'] is None else ''
             wt_miss = 'miss' if r['wt'] is None else ''
             mdl_miss = 'miss' if r['is_battery'] and not r['models'] else ''
