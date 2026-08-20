@@ -544,7 +544,7 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
     h.append("<h2>② 分单件数/毛重/机型（G2）</h2>"
              "<div class='tip'>可修改主单/分单号、含电池标记、件数、毛重、机型；不需要的分单点「删除」移除。</div>"
              "<table><tr><th>主单</th><th>分单</th><th>含电池</th><th>品类</th>"
-             "<th>件数</th><th>毛重</th><th>机型（逗号分隔）</th><th>操作</th></tr>")
+             "<th>件数</th><th>毛重</th><th>机型（逗号分隔）</th><th>零件品名</th><th>操作</th></tr>")
     ri = 0
     prev_master = None
     for eml, body, msg, recs, sc in st['per_eml']:
@@ -554,7 +554,7 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
             if sc is not None and r['master'] not in sc:
                 continue
             if r['master'] != prev_master:
-                cols = 8  # 总列数
+                cols = 9  # 总列数
                 h.append(f"<tr class='sep'><td colspan='{cols}'>主单 {esc(r['master'])}</td></tr>")
                 prev_master = r['master']
             pcs_miss = 'miss' if r['pcs'] is None else ''
@@ -564,6 +564,11 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
                 f"<option value='1'{' selected' if r['is_battery'] else ''}>是</option>"
                 f"<option value='0'{' selected' if not r['is_battery'] else ''}>否</option>")
             cat_label = {'phone': '手机', 'module': '模组'}.get(r.get('category', ''), '-')
+            # 零件品名：非电池分单显示中英文零件名
+            if not r['is_battery'] and r.get('parts'):
+                parts_display = '; '.join(f"{cn} / {en}" for cn, en in r['parts'])
+            else:
+                parts_display = ''
             h.append(f"<tr id='rec-{ri}'>"
                      f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='master' size='14' value='{escq(r['master'])}'></td>"
                      f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='hawb' size='14' value='{escq(r['hawb'])}'></td>"
@@ -572,6 +577,7 @@ button{{font-size:15px;padding:8px 22px;background:#1a7f37;color:#fff;border:non
                      f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='pcs' size='4' class='{pcs_miss}' value='{'' if r['pcs'] is None else r['pcs']}'></td>"
                      f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='wt' size='6' class='{wt_miss}' value='{'' if r['wt'] is None else r['wt']}'></td>"
                      f"<td><input data-ri='{ri}' data-rec='{escq(r['hawb'])}' data-field='models' size='28' class='{mdl_miss}' value='{escq(','.join(r['models']))}' placeholder='如 A2636,A2881'></td>"
+                     f"<td style='font-size:12px;color:#555'>{esc(parts_display)}</td>"
                      f"<td><button type='button' class='delbtn' onclick='delRec({ri})'>删除</button>"
                      f"<button type='button' class='rstbtn' onclick='rstRec({ri})' style='display:none' id='rst-{ri}'>恢复</button></td></tr>")
             ri += 1
@@ -823,7 +829,7 @@ button{{font-size:15px;padding:8px 22px;color:#fff;border:none;border-radius:6px
     _seen_hawb = set()  # 和 build_masters 保持一致：同一分单只归属首次出现的主单
     for master, ent in st['masters_all'].items():
         h.append(f"<h2>主单 {esc(master)}（总件数 {ent.get('pcs', '-')}，含电池分单 {ent.get('bpcs', 0)} 件）</h2>")
-        h.append("<table><tr><th>HAWB</th><th>含电池</th><th>品类</th><th>件数</th><th>毛重</th><th>机型</th></tr>")
+        h.append("<table><tr><th>HAWB</th><th>含电池</th><th>品类</th><th>件数</th><th>毛重</th><th>机型</th><th>零件品名</th></tr>")
         for r in st['recs_all']:
             if r['master'] != master or not r['hawb']:
                 continue
@@ -831,11 +837,17 @@ button{{font-size:15px;padding:8px 22px;color:#fff;border:none;border-radius:6px
                 continue
             _seen_hawb.add(r['hawb'])
             cat_label = {'phone': '手机', 'module': '模组'}.get(r.get('category', ''), '-')
+            # 零件品名：非电池分单显示中英文零件名
+            if not r['is_battery'] and r.get('parts'):
+                parts_display = '; '.join(f"{cn} / {en}" for cn, en in r['parts'])
+            else:
+                parts_display = ''
             h.append(f"<tr><td>{esc(r['hawb'])}</td><td>{'是' if r['is_battery'] else '否'}</td>"
                      f"<td>{cat_label}</td>"
                      f"<td>{r['pcs'] if r['pcs'] is not None else '-'}</td>"
                      f"<td>{r['wt'] if r['wt'] is not None else '-'}</td>"
-                     f"<td>{esc(','.join(r['models']) or '-')}</td></tr>")
+                     f"<td>{esc(','.join(r['models']) or '-')}</td>"
+                     f"<td style='font-size:12px;color:#555'>{esc(parts_display)}</td></tr>")
         h.append("</table><table><tr><th>机型</th><th>鉴定证书编号（可修改）</th>"
                  "<th>中文品名（按当前证书行）</th><th>英文品名（按当前证书行）</th></tr>")
         for mdl in ent['models']:
