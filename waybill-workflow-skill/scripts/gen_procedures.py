@@ -227,7 +227,7 @@ def make_anxian(master, info):
         if N * lh > cap:
             return None
         wmax = max([song.text_length(t, fontsize=f) for t in ml] +
-                   [song.text_length(t, fontsize=f) for p in pairs for t in p])
+                   [song.text_length(t, fontsize=f) for p in pairs for t in p], default=0)
         if wmax > W:
             return None
         return lh, ml
@@ -283,12 +283,12 @@ def make_yingji(master, info):
     fs = lh = None
     for f in (8.0, 7.5, 7.0):
         l = f * 8.4 / 7.0
-        if len(cn_list) * l <= CAP and max(mixed_width(c + ',', f) for c in cn_list) <= W:
+        if len(cn_list) * l <= CAP and max((mixed_width(c + ',', f) for c in cn_list), default=0) <= W:
             fs, lh = f, l
             break
     if fs is None:
-        w7 = max(mixed_width(c + ',', 7.0) for c in cn_list)
-        lh = min(8.4, CAP / len(cn_list))
+        w7 = max((mixed_width(c + ',', 7.0) for c in cn_list), default=W) or W
+        lh = min(8.4, CAP / max(len(cn_list), 1))
         fs = max(6.0, min(7.0, lh * 7.0 / 8.4, 7.0 * W / w7))
         lh = fs * 8.4 / 7.0
     y = 98.8 + fs * 0.8
