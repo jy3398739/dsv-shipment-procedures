@@ -121,6 +121,9 @@ def fill_jiaoyun(master, tpl_pdf_dir, data, out_dir):
     src = xlsx_list[0]
     wb = openpyxl.load_workbook(src)
     ws = wb["表样"]
+    # 解除数据区(第5行起)合并单元格，防写入只读 MergedCell 报错
+    for rng in [r for r in list(ws.merged_cells.ranges) if r.min_row >= 5]:
+        ws.unmerge_cells(str(rng))
     total_pcs = sum(h["pcs"] or 0 for h in data["hawbs"])
     total_wt = sum(h["wt"] or 0 for h in data["hawbs"])
     goods = [model2cert_global[m]["cn"] for m in data["models"] if m in model2cert_global]

@@ -541,6 +541,10 @@ def wrap_text_cn(text, font, fs, maxw):
 def fill_jiaoyun(master, info):
     src = next(os.path.join(JY_TPL, f) for f in os.listdir(JY_TPL) if '交运单' in f)
     wb = openpyxl.load_workbook(src); ws = wb['表样']
+    # 解除与数据区(第5行起)相交的合并单元格：合并区内非左上角格只读，写入会报
+    # 'MergedCell' object attribute 'value' is read-only（如模板 B10:B11/B12:B13）
+    for rng in [r for r in list(ws.merged_cells.ranges) if r.min_row >= 5]:
+        ws.unmerge_cells(str(rng))
     pcs = sum(h[1] for h in info['hawbs'])
     wt = round(sum(h[2] for h in info['hawbs']), 1)
     goods_text = '\n'.join(goods_of(info)[0])
