@@ -1,0 +1,6 @@
+[Unit]
+Description=DSV 定期清理（出货手续包生成数据 + 测试模板，保留邮件去重状态）
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/dsv/scripts/weekly_cleanup.sh
