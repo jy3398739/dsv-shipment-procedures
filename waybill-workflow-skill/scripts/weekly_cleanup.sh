@@ -15,7 +15,8 @@ find "$PKG" -mindepth 1 -maxdepth 1 ! -name '_daemon_state.json' -exec rm -rf {}
 mkdir -p "$PKG/_mails"
 chown -R dsv:dsv "$PKG"
 # 删除上传的测试模板（公共模板与 xlsx 不带"测试"前缀，不受影响）
-rm -rf "$TPL"/测试* 2>>"$LOG"
+# 排除长期保留的模板：测试176-61334210模板
+find "$TPL" -mindepth 1 -maxdepth 1 -name '测试*' ! -name '测试176-61334210模板' -exec rm -rf {} + 2>>"$LOG"
 
 systemctl start dsv-mail
 sleep 2
