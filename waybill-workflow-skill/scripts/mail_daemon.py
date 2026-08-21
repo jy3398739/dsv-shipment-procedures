@@ -648,8 +648,13 @@ def process_message(cfg, msg):
                            'msg_id': msg_id, 'subject': subject}
         jobs_dump()
         log(f"  [结果] 缺 {len(issues)} 项，回信补充链接 /t/{token}/")
-        smtp_send(cfg, to, f"手续包需要补充 {len(issues)} 项信息：{subject[:30]}",
-                  fill_mail_html(base, token, issues), in_reply_to=msg_id)
+        ok = send_reply(cfg, to, f"手续包需要补充 {len(issues)} 项信息：{subject[:30]}",
+                        fill_mail_html(base, token, issues), in_reply_to=msg_id)
+        if not ok:
+            with JOBS_LOCK:
+                JOBS.pop(token, None)
+            jobs_dump()
+            log("  [放弃] 补充链接邮件多次发送失败，已回滚任务，等待人工介入")
         return
     # ready：信息齐全 → 回信确认链接，人工确认后才生成
     st = res['st']
@@ -660,8 +665,26 @@ def process_message(cfg, msg):
                        'msg_id': msg_id, 'subject': subject}
     jobs_dump()
     log(f"  [结果] 信息齐全，回信确认链接 /t/{token}/confirm")
-    smtp_send(cfg, to, f"请确认生成手续包（{len(masters)} 个主单）：{subject[:30]}",
-              confirm_mail_html(base, token, masters), in_reply_to=msg_id)
+    ok = send_reply(cfg, to, f"请确认生成手续包（{len(masters)} 个主单）：{subject[:30]}",
+                    confirm_mail_html(base, token, masters), in_reply_to=msg_id)
+    if not ok:
+        with JOBS_LOCK:
+            JOBS.pop(token, None)
+        jobs_dump()
+        log("  [放弃] 确认链接邮件多次发送失败，已回滚任务，等待人工介入")
+
+
+def send_reply(cfg, to, subject, html, in_reply_to=None, tries=3):
+    """回信发送，失败重试；全部失败返回 False（调用方仍须记 seen，防每轮轮询重发轰炸）"""
+    import time
+    for i in range(tries):
+        try:
+            smtp_send(cfg, to, subject, html, in_reply_to=in_reply_to)
+            return True
+        except Exception as e:
+            log(f"  [发送失败] 第{i + 1}次：{e}")
+            time.sleep(5 * (i + 1))
+    return False
 
 
 # ================== IMAP 轮询 ==================
@@ -690,8 +713,6 @@ def poll_loop(cfg, state):
                         msg = email.message_from_bytes(md[0][1])
                         if not should_process(cfg, msg):
                             log(f"  [跳过] 非订舱邮件（无关键词/白名单命中）：{(hdr(msg, 'Subject') or '')[:40]}")
-                            state['seen'].append(uid_s)
-                            save_state(state)
                             box.uid('store', uid, '+FLAGS', '\\Seen')
                             continue
                         process_message(cfg, msg)
@@ -699,6 +720,7 @@ def poll_loop(cfg, state):
                         import traceback
                         traceback.print_exc()
                         log(f"  [错误] 处理失败：{e}")
+                    # 无论成功失败都记 seen：避免发送失败/解析异常时同一封邮件每轮轮询都重复发信轰炸
                     state['seen'].append(uid_s)
                     save_state(state)
                     box.uid('store', uid, '+FLAGS', '\\Seen')
